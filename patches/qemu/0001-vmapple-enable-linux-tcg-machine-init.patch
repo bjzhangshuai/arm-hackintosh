@@ -1,0 +1,120 @@
+From 40a0bc266909916da64da85e55f3b6e48f1577e3 Mon Sep 17 00:00:00 2001
+From: MacVM Project <macvm@localhost>
+Date: Fri, 7 Aug 2026 00:00:00 +0800
+Subject: [PATCH] hw/vmapple: enable machine initialization with TCG
+
+The upstream vmapple machine is hidden behind HVF and constructs an Apple
+ParavirtualizedGraphics device unconditionally.  That makes even a machine
+initialization smoke test impossible on Linux.
+
+Allow TCG builds, select the native Apple PVG device only with HVF, and map
+explicit unimplemented sentinels at the two PVG MMIO ranges otherwise.  The
+sentinels are intentionally not a graphics implementation: they preserve the
+memory map and make unsupported guest accesses observable until the Linux
+Vulkan MMIO backend is connected.
+
+Use the TCG-capable max CPU by default and mark the board as AArch64-only so
+the machine is registered in qemu-system-aarch64.
+---
+ configs/devices/aarch64-softmmu/default.mak |  2 +-
+ hw/vmapple/Kconfig                          |  5 +++--
+ hw/vmapple/vmapple.c                        | 20 +++++++++++++++++++-
+ 3 files changed, 23 insertions(+), 4 deletions(-)
+
+diff --git a/configs/devices/aarch64-softmmu/default.mak b/configs/devices/aarch64-softmmu/default.mak
+index ad8028c..a7c7822 100644
+--- a/configs/devices/aarch64-softmmu/default.mak
++++ b/configs/devices/aarch64-softmmu/default.mak
+@@ -9,4 +9,4 @@ include ../arm-softmmu/default.mak
+ # CONFIG_XLNX_VERSAL=n
+ # CONFIG_SBSA_REF=n
+ # CONFIG_NPCM8XX=n
+-CONFIG_VMAPPLE=n
++CONFIG_VMAPPLE=y
+diff --git a/hw/vmapple/Kconfig b/hw/vmapple/Kconfig
+index 2382b29..379a9f0 100644
+--- a/hw/vmapple/Kconfig
++++ b/hw/vmapple/Kconfig
+@@ -15,7 +15,7 @@ config VMAPPLE_VIRTIO_BLK
+ config VMAPPLE
+     bool
+     depends on ARM
+-    depends on HVF
++    depends on TCG || HVF
+     default y if ARM
+     imply PCI_DEVICES
+     select ARM_GICV3
+@@ -30,5 +30,6 @@ config VMAPPLE
+     select VMAPPLE_AES
+     select VMAPPLE_BDIF
+     select VMAPPLE_CFG
+-    select MAC_PVG_MMIO
++    select MAC_PVG_MMIO if HVF
++    select UNIMP if !MAC_PVG_MMIO
+     select VMAPPLE_VIRTIO_BLK
+diff --git a/hw/vmapple/vmapple.c b/hw/vmapple/vmapple.c
+index 607181f..8c90214 100644
+--- a/hw/vmapple/vmapple.c
++++ b/hw/vmapple/vmapple.c
+@@ -32,10 +32,12 @@
+ #include "hw/core/sysbus.h"
+ #include "hw/usb/usb.h"
+ #include "hw/arm/boot.h"
++#include "hw/arm/machines-qom.h"
+ #include "hw/char/pl011.h"
+ #include "hw/intc/arm_gic.h"
+ #include "hw/intc/arm_gicv3_common.h"
+ #include "hw/misc/pvpanic.h"
++#include "hw/misc/unimp.h"
+ #include "hw/pci-host/gpex.h"
+ #include "hw/usb/hcd-xhci-pci.h"
+ #include "hw/virtio/virtio-pci.h"
+@@ -205,6 +207,7 @@ static bool create_cfg(VMAppleMachineState *vms, MemoryRegion *mem,
+ 
+ static void create_gfx(VMAppleMachineState *vms, MemoryRegion *mem)
+ {
++#ifdef CONFIG_MAC_PVG_MMIO
+     int irq_gfx = vms->irqmap[VMAPPLE_APV_GFX];
+     int irq_iosfc = vms->irqmap[VMAPPLE_APV_IOSFC];
+     SysBusDevice *gfx;
+@@ -215,6 +218,20 @@ static void create_gfx(VMAppleMachineState *vms, MemoryRegion *mem)
+     sysbus_connect_irq(gfx, 0, qdev_get_gpio_in(vms->gic, irq_gfx));
+     sysbus_connect_irq(gfx, 1, qdev_get_gpio_in(vms->gic, irq_iosfc));
+     sysbus_realize_and_unref(gfx, &error_fatal);
++#else
++    /*
++     * Keep the Apple PVG address ranges visible while building the vmapple
++     * machine on hosts without Apple's ParavirtualizedGraphics framework.
++     * The macvm project replaces these sentinels with its Linux Vulkan MMIO
++     * backend in the next integration phase.
++     */
++    create_unimplemented_device("vmapple-pvg",
++                                vms->memmap[VMAPPLE_APV_GFX].base,
++                                vms->memmap[VMAPPLE_APV_GFX].size);
++    create_unimplemented_device("vmapple-iosfc",
++                                vms->memmap[VMAPPLE_APV_IOSFC].base,
++                                vms->memmap[VMAPPLE_APV_IOSFC].size);
++#endif
+ }
+ 
+ static void create_aes(VMAppleMachineState *vms, MemoryRegion *mem)
+@@ -583,7 +600,7 @@ static void vmapple_machine_class_init(ObjectClass *oc, const void *data)
+     mc->minimum_page_bits = 12;
+     mc->possible_cpu_arch_ids = vmapple_possible_cpu_arch_ids;
+     mc->cpu_index_to_instance_props = vmapple_cpu_index_to_props;
+-    mc->default_cpu_type = ARM_CPU_TYPE_NAME("host");
++    mc->default_cpu_type = ARM_CPU_TYPE_NAME("max");
+     mc->get_default_cpu_node_id = vmapple_get_default_cpu_node_id;
+     mc->default_ram_id = "mach-vmapple.ram";
+     mc->desc = "Apple aarch64 Virtual Machine";
+@@ -609,6 +626,7 @@ static const TypeInfo vmapple_machine_info = {
+     .instance_size = sizeof(VMAppleMachineState),
+     .class_init    = vmapple_machine_class_init,
+     .instance_init = vmapple_instance_init,
++    .interfaces    = aarch64_machine_interfaces,
+ };
+ 
+ static void machvmapple_machine_init(void)
+-- 
+2.50.1
+

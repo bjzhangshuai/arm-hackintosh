@@ -1,0 +1,30 @@
+From 54a9c31f5e2896c35a9d394c2041f710a38b2d45 Mon Sep 17 00:00:00 2001
+From: MacVM Project <macvm@localhost>
+Date: Tue, 1 Sep 2026 19:30:00 +0800
+Subject: [PATCH] hw/vmapple: include target device configuration
+
+VMApple selects display devices through the per-target Kconfig output, but the
+machine source did not include CONFIG_DEVICES.  Consequently both the native
+MAC_PVG_MMIO branch and the Linux MACVM_REIMS_VGPU branch were removed by the
+preprocessor and the unimplemented fallback was instantiated at runtime.
+
+Include the generated target device configuration before testing either
+symbol, matching other per-target machine sources.
+---
+ hw/vmapple/vmapple.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/hw/vmapple/vmapple.c b/hw/vmapple/vmapple.c
+index be7b3f1..81fac2a 100644
+--- a/hw/vmapple/vmapple.c
++++ b/hw/vmapple/vmapple.c
+@@ -14,6 +14,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include CONFIG_DEVICES
+ #include "qemu/bitops.h"
+ #include "qemu/datadir.h"
+ #include "qemu/error-report.h"
+-- 
+2.50.1

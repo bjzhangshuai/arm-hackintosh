@@ -1,0 +1,31 @@
+From 13d41fc0b731067db8faf062412ece140fb87ef0 Mon Sep 17 00:00:00 2001
+From: MacVM Project <macvm@localhost>
+Date: Fri, 7 Aug 2026 00:00:01 +0800
+Subject: [PATCH] hw/vmapple/aes: use integer constant array bound
+
+In C, a block-scope static const size_t is not an integer constant
+expression.  GCC therefore treats the diagnostic buffer as a variable-length
+array and rejects its string initializer when VMAPPLE_AES is enabled on Linux.
+
+Use an enum constant so the bound remains compile-time constant on both GCC
+and Clang.
+---
+ hw/vmapple/aes.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/hw/vmapple/aes.c b/hw/vmapple/aes.c
+index 7f59da4..11354a2 100644
+--- a/hw/vmapple/aes.c
++++ b/hw/vmapple/aes.c
+@@ -253,7 +253,7 @@ static bool cmd_iv(AESState *s)
+ 
+ static void dump_data(const char *desc, const void *p, size_t len)
+ {
+-    static const size_t MAX_LEN = 0x1000;
++    enum { MAX_LEN = 0x1000 };
+     char hex[MAX_LEN * 2 + 1] = "";
+ 
+     if (len > MAX_LEN) {
+-- 
+2.50.1
+

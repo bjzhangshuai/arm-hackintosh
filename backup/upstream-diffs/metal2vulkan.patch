@@ -1,0 +1,857 @@
+diff --git a/src/native/emitter/memory/index_ptr.rs b/src/native/emitter/memory/index_ptr.rs
+index 939ea5e..70c7223 100644
+--- a/src/native/emitter/memory/index_ptr.rs
++++ b/src/native/emitter/memory/index_ptr.rs
+@@ -298,12 +298,10 @@ impl Emitter {
+         let nbytes = bits / 8;
+         let uchar_ty = self.type_id(&LlType::Int(8))?;
+         let ptr_ty = self.ptr_type_id(storage, &LlType::Int(8))?;
+-        // Accumulate in the integer width we bitcast from (u32 for <=32-bit results, u64 for 64-bit).
+-        let acc_ty_ll = if bits <= 32 {
+-            LlType::Int(32)
+-        } else {
+-            LlType::Int(64)
+-        };
++        // Accumulate in the exact integer width we bitcast from.  A 16-bit scalar (half/bfloat/i16)
++        // must end as a u16 before `OpBitcast` — `OpBitcast %half %uint` is invalid because the bit
++        // widths differ.
++        let acc_ty_ll = LlType::Int(bits);
+         let acc_ty = self.type_id(&acc_ty_ll)?;
+         let mut acc: Option<Word> = None;
+         for k in 0..nbytes {
+@@ -337,7 +335,7 @@ impl Emitter {
+             let shifted = if k == 0 {
+                 widened
+             } else {
+-                let s = self.const_uint(k * 8)?;
++                    let s = self.const_int(bits, u64::from(k * 8))?;
+                 let sh = self.fresh();
+                 instructions.push(Self::inst(
+                     Op::ShiftLeftLogical,
+diff --git a/src/native/emitter/pointers/phi_merge.rs b/src/native/emitter/pointers/phi_merge.rs
+index 12c476a..f779c85 100644
+--- a/src/native/emitter/pointers/phi_merge.rs
++++ b/src/native/emitter/pointers/phi_merge.rs
+@@ -148,6 +148,16 @@ impl Emitter {
+         match value {
+             LlValue::Local(name) => {
+                 if let Some(pointee) = self.pointer_pointees.get(name) {
++                    let gep_leaf_is_byte = self
++                        .gep_provenance
++                        .get(name)
++                        .map(|provenance| {
++                            gep_pointee(&provenance.source_ty, &provenance.indices)
++                                .and_then(|leaf| self.resolve_type(&leaf))
++                                .map(|leaf| leaf == LlType::Int(8))
++                        })
++                        .transpose()?
++                        .unwrap_or(false);
+                     // M2 (S20) byte→real upgrade: the emitter recorded the `Int(8)` BYTE PLACEHOLDER
+                     // for this local pointer (a def-time typing gap, not a real `i8*`), yet the
+                     // use-implied carrier knows the concrete element type the pointer is actually
+@@ -170,6 +180,7 @@ impl Emitter {
+                         && !self.raw_offsets.contains_key(name)
+                         && !self.unmodeled_pointers.contains(name)
+                         && !self.tir_byte_view_pointers.contains(name)
++                        && !gep_leaf_is_byte
+                     {
+                         if let Some(carrier) = self.tir_use_pointees.get(name) {
+                             let carrier = self.resolve_type(carrier)?;
+diff --git a/src/native/tests/buffers.rs b/src/native/tests/buffers.rs
+index 445033a..a84172c 100644
+--- a/src/native/tests/buffers.rs
++++ b/src/native/tests/buffers.rs
+@@ -5837,6 +5837,61 @@ entry:
+     }
+ }
+ 
++#[test]
++fn native_i8_record_array_vector_loads_byte_assemble() {
++    // Boot64's first visible Recovery draw hit this shape: the stage/vertex stream is modeled as a
++    // record array whose payload is a flat byte array, but the shader loads wider vectors from offsets
++    // inside that byte payload.  The GEP itself must stay a `uchar` pointer; the following vector loads
++    // must assemble bytes instead of upgrading the pointee and emitting invalid SPIR-V such as
++    // `OpLoad %v4float %_ptr_StorageBuffer_uchar`.
++    let ll = r#"
++target triple = "spirv-unknown-vulkan1.3"
++%struct.StageIn = type { [48 x i8] }
++
++define void @StageBytes(i32 %idx, ptr addrspace(1) %stage, ptr addrspace(1) %out, ptr addrspace(1) %hout) {
++entry:
++  %slot = zext i32 %idx to i64
++  %pos_ptr = getelementptr inbounds %struct.StageIn, ptr addrspace(1) %stage, i64 %slot, i32 0, i64 0
++  %pos = load <4 x float>, ptr addrspace(1) %pos_ptr, align 4
++  %half_ptr = getelementptr inbounds %struct.StageIn, ptr addrspace(1) %stage, i64 %slot, i32 0, i64 32
++  %vary = load <4 x half>, ptr addrspace(1) %half_ptr, align 2
++  store <4 x float> %pos, ptr addrspace(1) %out, align 16
++  store <4 x half> %vary, ptr addrspace(1) %hout, align 8
++  ret void
++}
++
++!air.kernel = !{!0}
++!0 = !{ptr @StageBytes, !1, !2}
++!1 = !{}
++!2 = !{!3, !4, !5, !6}
++!3 = !{i32 0, !"air.thread_position_in_grid", !"air.arg_type_name", !"uint", !"air.arg_name", !"idx"}
++!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read", !"air.address_space", i32 1, !"air.arg_type_size", i32 48, !"air.arg_type_align_size", i32 1, !"air.arg_type_name", !"uchar", !"air.arg_name", !"stage"}
++!5 = !{i32 2, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.write", !"air.address_space", i32 1, !"air.arg_type_size", i32 16, !"air.arg_type_align_size", i32 16, !"air.arg_type_name", !"float4", !"air.arg_name", !"out"}
++!6 = !{i32 3, !"air.buffer", !"air.location_index", i32 2, i32 1, !"air.write", !"air.address_space", i32 1, !"air.arg_type_size", i32 8, !"air.arg_type_align_size", i32 8, !"air.arg_type_name", !"half4", !"air.arg_name", !"hout"}
++"#;
++    let tmp = std::env::temp_dir().join(format!(
++        "metal2vulkan_native_i8_record_array_vector_loads_{}",
++        std::process::id()
++    ));
++    let _ = std::fs::create_dir_all(&tmp);
++    let spv = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate");
++    let asm = disassemble(&spv).expect("disassemble");
++    assert!(
++        !asm.lines().any(|line| line.contains("OpLoad %v4float")),
++        "{asm}"
++    );
++    assert!(
++        !asm.lines().any(|line| line.contains("OpLoad %v4half")),
++        "{asm}"
++    );
++    assert!(asm.contains("OpTypeInt 8"), "{asm}");
++    assert!(asm.matches("OpLoad").count() >= 8, "{asm}");
++    assert!(asm.contains("OpShiftLeftLogical"), "{asm}");
++    assert!(asm.contains("OpBitwiseOr"), "{asm}");
++    assert!(asm.contains("OpBitcast"), "{asm}");
++    assert!(asm.contains("OpCompositeConstruct"), "{asm}");
++}
++
+ #[test]
+ fn native_raw_pointer_load_from_dynamic_byte_offset_uses_placeholder() {
+     let ll = r#"
+diff --git a/src/native/tests/interface.rs b/src/native/tests/interface.rs
+index 3e0c1e0..745ff63 100644
+--- a/src/native/tests/interface.rs
++++ b/src/native/tests/interface.rs
+@@ -16,6 +16,296 @@ use crate::{disassemble, meta, tools};
+ use spirv::{BuiltIn, Capability, Decoration, Op, Scope, SelectionControl, StorageClass, Word};
+ use std::collections::{HashMap, HashSet};
+ 
++#[test]
++fn native_vertex_storage_buffer_is_not_entry_interface() {
++    let ll = r#"
++source_filename = "synth_vertex_buffer_interface"
++target datalayout = "e-p:64:64:64"
++target triple = "air64-apple-macosx14.0.0"
++
++define <{ <4 x float> }> @vmain(ptr addrspace(1) %buf, i32 %vid) local_unnamed_addr #0 {
++  %p = getelementptr inbounds float, ptr addrspace(1) %buf, i32 %vid
++  %x = load float, ptr addrspace(1) %p, align 4
++  %y = fadd float %x, 1.000000e+00
++  %pos0 = insertelement <4 x float> poison, float %x, i64 0
++  %pos1 = insertelement <4 x float> %pos0, float %y, i64 1
++  %pos2 = insertelement <4 x float> %pos1, float 0.000000e+00, i64 2
++  %pos3 = insertelement <4 x float> %pos2, float 1.000000e+00, i64 3
++  %out = insertvalue <{ <4 x float> }> undef, <4 x float> %pos3, 0
++  ret <{ <4 x float> }> %out
++}
++
++attributes #0 = { nounwind }
++
++!air.vertex = !{!0}
++!0 = !{ptr @vmain, !1, !3}
++!1 = !{!2}
++!2 = !{!"air.position", !"air.arg_type_name", !"float4"}
++!3 = !{!4, !5}
++!4 = !{i32 0, !"air.buffer", !"air.location_index", i32 2, i32 1, !"air.read", !"air.address_space", i32 1, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"float", !"air.arg_name", !"buf"}
++!5 = !{i32 1, !"air.vertex_id", !"air.arg_type_name", !"uint", !"air.arg_name", !"vid"}
++"#;
++    let tmp = std::env::temp_dir().join(format!(
++        "metal2vulkan_native_vertex_buffer_interface_{}",
++        std::process::id()
++    ));
++    let _ = std::fs::create_dir_all(&tmp);
++    let out = crate::translate_sanitized_native(ll, Stage::Vertex, &tmp).expect("translate");
++    let module = load_bytes(&out).expect("parse transformed");
++    let defs: HashMap<Word, &Instruction> = module
++        .types_global_values
++        .iter()
++        .filter_map(|inst| inst.result_id.map(|id| (id, inst)))
++        .collect();
++    let storage_vars: HashSet<Word> = module
++        .types_global_values
++        .iter()
++        .filter(|inst| {
++            inst.class.opcode == Op::Variable
++                && inst.operands.first() == Some(&Operand::StorageClass(StorageClass::StorageBuffer))
++        })
++        .filter_map(|inst| inst.result_id)
++        .collect();
++    assert!(!storage_vars.is_empty(), "expected a StorageBuffer variable");
++    assert!(
++        module.annotations.iter().any(|inst| {
++            inst.class.opcode == Op::Decorate
++                && inst.operands.get(1) == Some(&Operand::Decoration(Decoration::Binding))
++                && matches!(inst.operands.first(), Some(Operand::IdRef(id)) if storage_vars.contains(id))
++        }),
++        "StorageBuffer must remain descriptor-bound"
++    );
++    let entry_interface: HashSet<Word> = module
++        .entry_points
++        .iter()
++        .flat_map(|entry| entry.operands.iter().skip(3))
++        .filter_map(|op| match op {
++            Operand::IdRef(id) => Some(*id),
++            _ => None,
++        })
++        .collect();
++    assert!(
++        storage_vars.is_disjoint(&entry_interface),
++        "StorageBuffer variables must not be listed on OpEntryPoint"
++    );
++    for id in &entry_interface {
++        let storage_class = defs
++            .get(id)
++            .and_then(|inst| inst.operands.first())
++            .unwrap_or_else(|| panic!("entry interface id {id} is not a variable"));
++        assert!(
++            matches!(
++                storage_class,
++                Operand::StorageClass(StorageClass::Input)
++                    | Operand::StorageClass(StorageClass::Output)
++            ),
++            "entry interface id {id} has non-stage storage class {storage_class:?}"
++        );
++    }
++    let asm = disassemble(&out).expect("disassemble transformed");
++    assert!(asm.contains("StorageBuffer"), "{asm}");
++    if std::process::Command::new("spirv-val")
++        .arg("--version")
++        .output()
++        .is_ok()
++    {
++        tools::spirv_val_bytes(&out, &tmp).expect("spirv-val");
++    }
++}
++
++#[test]
++fn native_half_location_varyings_use_float32_stage_interface() {
++    fn defs<'a>(module: &'a crate::spirv_module::Module) -> HashMap<Word, &'a Instruction> {
++        module
++            .types_global_values
++            .iter()
++            .filter_map(|inst| inst.result_id.map(|id| (id, inst)))
++            .collect()
++    }
++    fn location_var(
++        module: &crate::spirv_module::Module,
++        storage: StorageClass,
++        location: u32,
++    ) -> Word {
++        let defs = defs(module);
++        module
++            .annotations
++            .iter()
++            .find_map(|inst| match inst.operands.as_slice() {
++                [
++                    Operand::IdRef(var),
++                    Operand::Decoration(Decoration::Location),
++                    Operand::LiteralBit32(loc),
++                ] if *loc == location
++                    && defs.get(var).is_some_and(|def| {
++                        def.class.opcode == Op::Variable
++                            && def.operands.first()
++                                == Some(&Operand::StorageClass(storage))
++                    }) =>
++                {
++                    Some(*var)
++                }
++                _ => None,
++            })
++            .unwrap_or_else(|| panic!("{storage:?} Location {location} variable missing"))
++    }
++    fn pointer_pointee(defs: &HashMap<Word, &Instruction>, var: Word) -> Word {
++        let ptr_ty = defs
++            .get(&var)
++            .and_then(|inst| inst.result_type)
++            .unwrap_or_else(|| panic!("variable {var} has no pointer type"));
++        defs.get(&ptr_ty)
++            .and_then(|ptr| match ptr.operands.get(1) {
++                Some(Operand::IdRef(pointee)) => Some(*pointee),
++                _ => None,
++            })
++            .unwrap_or_else(|| panic!("variable {var} pointer type has no pointee"))
++    }
++    fn is_float_vector(
++        defs: &HashMap<Word, &Instruction>,
++        ty: Word,
++        width: u32,
++        lanes: u32,
++    ) -> bool {
++        let Some(vec_def) = defs.get(&ty) else {
++            return false;
++        };
++        if vec_def.class.opcode != Op::TypeVector {
++            return false;
++        }
++        let (Some(Operand::IdRef(elem)), Some(Operand::LiteralBit32(actual_lanes))) =
++            (vec_def.operands.first(), vec_def.operands.get(1))
++        else {
++            return false;
++        };
++        if *actual_lanes != lanes {
++            return false;
++        }
++        defs.get(elem).is_some_and(|elem_def| {
++            elem_def.class.opcode == Op::TypeFloat
++                && elem_def.operands.first() == Some(&Operand::LiteralBit32(width))
++        })
++    }
++    fn has_fconvert_to_float_vector(
++        module: &crate::spirv_module::Module,
++        defs: &HashMap<Word, &Instruction>,
++        width: u32,
++        lanes: u32,
++    ) -> bool {
++        module.functions.iter().any(|function| {
++            function.blocks.iter().any(|block| {
++                block.instructions.iter().any(|inst| {
++                    inst.class.opcode == Op::FConvert
++                        && inst
++                            .result_type
++                            .is_some_and(|ty| is_float_vector(defs, ty, width, lanes))
++                })
++            })
++        })
++    }
++
++    let vertex_ll = r#"
++source_filename = "synth_half_varying_vertex"
++target datalayout = "e-p:64:64:64"
++target triple = "air64-apple-macosx14.0.0"
++
++define <{ <4 x float>, <4 x half> }> @vmain() local_unnamed_addr #0 {
++  %pos0 = insertelement <4 x float> poison, float 0.000000e+00, i64 0
++  %pos1 = insertelement <4 x float> %pos0, float 0.000000e+00, i64 1
++  %pos2 = insertelement <4 x float> %pos1, float 0.000000e+00, i64 2
++  %pos3 = insertelement <4 x float> %pos2, float 1.000000e+00, i64 3
++  %h0 = fptrunc float 2.500000e-01 to half
++  %h1 = fptrunc float 5.000000e-01 to half
++  %h2 = fptrunc float 7.500000e-01 to half
++  %h3 = fptrunc float 1.000000e+00 to half
++  %c0 = insertelement <4 x half> poison, half %h0, i64 0
++  %c1 = insertelement <4 x half> %c0, half %h1, i64 1
++  %c2 = insertelement <4 x half> %c1, half %h2, i64 2
++  %c3 = insertelement <4 x half> %c2, half %h3, i64 3
++  %out0 = insertvalue <{ <4 x float>, <4 x half> }> undef, <4 x float> %pos3, 0
++  %out1 = insertvalue <{ <4 x float>, <4 x half> }> %out0, <4 x half> %c3, 1
++  ret <{ <4 x float>, <4 x half> }> %out1
++}
++
++attributes #0 = { nounwind }
++
++!air.vertex = !{!0}
++!0 = !{ptr @vmain, !1, !4}
++!1 = !{!2, !3}
++!2 = !{!"air.position", !"air.arg_type_name", !"float4"}
++!3 = !{!"air.vertex_output", !"air.location_index", i32 0, i32 1, !"air.arg_type_name", !"half4", !"air.arg_name", !"color"}
++!4 = !{}
++"#;
++    let tmp = std::env::temp_dir().join(format!(
++        "metal2vulkan_native_half_vertex_io_{}",
++        std::process::id()
++    ));
++    let _ = std::fs::create_dir_all(&tmp);
++    let vertex = crate::translate_sanitized_native(vertex_ll, Stage::Vertex, &tmp)
++        .expect("translate vertex");
++    let vertex_module = load_bytes(&vertex).expect("parse vertex");
++    let vertex_defs = defs(&vertex_module);
++    let vertex_color = location_var(&vertex_module, StorageClass::Output, 0);
++    let vertex_color_ty = pointer_pointee(&vertex_defs, vertex_color);
++    assert!(
++        is_float_vector(&vertex_defs, vertex_color_ty, 32, 4),
++        "vertex half4 varying output must be widened to float4"
++    );
++    assert!(
++        has_fconvert_to_float_vector(&vertex_module, &vertex_defs, 32, 4),
++        "vertex output store should convert half4 to float4"
++    );
++    if std::process::Command::new("spirv-val")
++        .arg("--version")
++        .output()
++        .is_ok()
++    {
++        tools::spirv_val_bytes(&vertex, &tmp).expect("spirv-val vertex");
++    }
++
++    let fragment_ll = r#"
++source_filename = "synth_half_varying_fragment"
++target datalayout = "e-p:64:64:64"
++target triple = "air64-apple-macosx14.0.0"
++
++define <{ <4 x float> }> @fmain(<4 x half> %color) local_unnamed_addr #0 {
++  %color32 = fpext <4 x half> %color to <4 x float>
++  %out = insertvalue <{ <4 x float> }> undef, <4 x float> %color32, 0
++  ret <{ <4 x float> }> %out
++}
++
++attributes #0 = { nounwind }
++
++!air.fragment = !{!0}
++!0 = !{ptr @fmain, !1, !3}
++!1 = !{!2}
++!2 = !{!"air.render_target", i32 0, i32 0, !"air.arg_type_name", !"float4"}
++!3 = !{!4}
++!4 = !{i32 0, !"air.fragment_input", !"generated", !"air.arg_type_name", !"half4", !"air.arg_name", !"color"}
++"#;
++    let fragment = crate::translate_sanitized_native(fragment_ll, Stage::Fragment, &tmp)
++        .expect("translate fragment");
++    let fragment_module = load_bytes(&fragment).expect("parse fragment");
++    let fragment_defs = defs(&fragment_module);
++    let fragment_color = location_var(&fragment_module, StorageClass::Input, 0);
++    let fragment_color_ty = pointer_pointee(&fragment_defs, fragment_color);
++    assert!(
++        is_float_vector(&fragment_defs, fragment_color_ty, 32, 4),
++        "fragment half4 varying input must be widened to float4"
++    );
++    assert!(
++        has_fconvert_to_float_vector(&fragment_module, &fragment_defs, 16, 4),
++        "fragment input load should convert float4 back to half4"
++    );
++    if std::process::Command::new("spirv-val")
++        .arg("--version")
++        .output()
++        .is_ok()
++    {
++        tools::spirv_val_bytes(&fragment, &tmp).expect("spirv-val fragment");
++    }
++}
++
+ #[test]
+ fn native_fragment_depth_return_maps_to_frag_depth() {
+     let ll = r#"
+diff --git a/src/passes/finalize.rs b/src/passes/finalize.rs
+index 1a1ab31..aca3037 100644
+--- a/src/passes/finalize.rs
++++ b/src/passes/finalize.rs
+@@ -39,6 +39,20 @@ pub(in crate::passes) fn finalize(
+     let globals = std::mem::take(&mut ctx.new_globals);
+     ctx.module.types_global_values.extend(globals);
+ 
++    // Emit a Vulkan-compatible entry interface. Descriptor-backed resources are
++    // bound through DescriptorSet/Binding decorations, not through the
++    // OpEntryPoint interface list. Keep the interface restricted to user-visible
++    // stage Input/Output variables even when the LLVM/SPIR-V input arrived as
++    // 1.4+ and earlier passes registered every referenced global. Mesa llvmpipe
++    // otherwise tries to compile modules whose entry interface contains
++    // StorageBuffer globals and can abort in LLVM instead of returning a clean
++    // VkResult.
++    if let Some(header) = ctx.module.header.as_mut() {
++        if header.version() >= (1, 4) {
++            header.set_version(1, 3);
++        }
++    }
++
+     let entry_id = ctx.module.functions[entry_idx]
+         .def
+         .as_ref()
+@@ -55,24 +69,31 @@ pub(in crate::passes) fn finalize(
+         Operand::LiteralString("main".into()),
+     ];
+     let referenced_from_functions = function_referenced_ids(&ctx.module);
++    let storage_class_of_global = |id: Word| -> Option<StorageClass> {
++        ctx.module.types_global_values.iter().find_map(|inst| {
++            if inst.class.opcode == Op::Variable && inst.result_id == Some(id) {
++                match inst.operands.first() {
++                    Some(Operand::StorageClass(sc)) => Some(*sc),
++                    _ => None,
++                }
++            } else {
++                None
++            }
++        })
++    };
+     let mut interface = Vec::new();
+     let mut interface_ids = HashSet::new();
+     for &id in &ctx.interface {
++        let Some(storage_class) = storage_class_of_global(id) else {
++            continue;
++        };
++        if !matches!(storage_class, StorageClass::Input | StorageClass::Output) {
++            continue;
++        }
+         if referenced_from_functions.contains(&id) && interface_ids.insert(id) {
+             interface.push(id);
+         }
+     }
+-    for inst in &ctx.module.types_global_values {
+-        if inst.class.opcode == Op::Variable
+-            && inst.operands.first() == Some(&Operand::StorageClass(StorageClass::Workgroup))
+-        {
+-            if let Some(id) = inst.result_id {
+-                if referenced_from_functions.contains(&id) && interface_ids.insert(id) {
+-                    interface.push(id);
+-                }
+-            }
+-        }
+-    }
+     for id in interface {
+         ep_operands.push(Operand::IdRef(id));
+     }
+diff --git a/src/passes/mod.rs b/src/passes/mod.rs
+index 25c6248..67c3173 100644
+--- a/src/passes/mod.rs
++++ b/src/passes/mod.rs
+@@ -132,7 +132,9 @@ struct Ctx {
+     stage: Stage,
+     /// id of the GLSL.std.450 ext-inst import, created lazily.
+     glsl_ext: Option<Word>,
+-    /// interface variable ids to list on OpEntryPoint (Input/Output for <=1.3; everything for 1.4+).
++    /// Candidate interface variable ids collected by stage/resource lowering. Finalization keeps only
++    /// stage Input/Output variables on OpEntryPoint; descriptor-backed resources stay bound solely by
++    /// DescriptorSet/Binding decorations.
+     interface: Vec<Word>,
+     /// new type/constant/variable instructions to append to types_global_values.
+     new_globals: Vec<Instruction>,
+diff --git a/src/passes/resources/collapse.rs b/src/passes/resources/collapse.rs
+index bfd4b55..bdadafe 100644
+--- a/src/passes/resources/collapse.rs
++++ b/src/passes/resources/collapse.rs
+@@ -76,7 +76,9 @@ pub(in crate::passes) fn apply_bindings(
+                 load_ty,
+                 param_ty,
+             } => {
+-                // load the 32-bit builtin, then UConvert down to the narrower param int type.
++                // Load the interface value, then convert it into the entry parameter's type. This is
++                // normally the integer builtin path, but user half varyings may be widened to float32
++                // at the Vulkan stage interface for driver compatibility and need OpFConvert back.
+                 let lid = ctx.module.fresh_id();
+                 loads.push(Instruction::new(
+                     Op::Load,
+@@ -86,7 +88,7 @@ pub(in crate::passes) fn apply_bindings(
+                 ));
+                 let cid = ctx.module.fresh_id();
+                 loads.push(Instruction::new(
+-                    Op::UConvert,
++                    load_var_conversion_op(defs, load_ty, param_ty),
+                     Some(param_ty),
+                     Some(cid),
+                     vec![Operand::IdRef(lid)],
+@@ -701,6 +703,60 @@ fn scalar_or_vector_component_live(ctx: &Ctx, ty: Word) -> Option<(Word, Option<
+     }
+ }
+ 
++fn load_var_conversion_op(defs: &HashMap<Word, Instruction>, src_ty: Word, dst_ty: Word) -> Op {
++    if component_float_width(defs, src_ty).is_some() && component_float_width(defs, dst_ty).is_some()
++    {
++        return Op::FConvert;
++    }
++    match component_int_shape(defs, dst_ty) {
++        Some((_, true)) => Op::SConvert,
++        _ => Op::UConvert,
++    }
++}
++
++fn component_float_width(defs: &HashMap<Word, Instruction>, ty: Word) -> Option<u32> {
++    let def = defs.get(&ty)?;
++    match def.class.opcode {
++        Op::TypeFloat => match def.operands.first() {
++            Some(Operand::LiteralBit32(width)) => Some(*width),
++            _ => Some(32),
++        },
++        Op::TypeVector => {
++            let elem = match def.operands.first()? {
++                Operand::IdRef(elem) => *elem,
++                _ => return None,
++            };
++            component_float_width(defs, elem)
++        }
++        _ => None,
++    }
++}
++
++fn component_int_shape(defs: &HashMap<Word, Instruction>, ty: Word) -> Option<(u32, bool)> {
++    let def = defs.get(&ty)?;
++    match def.class.opcode {
++        Op::TypeInt => {
++            let bits = match def.operands.first()? {
++                Operand::LiteralBit32(bits) => *bits,
++                _ => return None,
++            };
++            let signed = match def.operands.get(1)? {
++                Operand::LiteralBit32(signed) => *signed != 0,
++                _ => return None,
++            };
++            Some((bits, signed))
++        }
++        Op::TypeVector => {
++            let elem = match def.operands.first()? {
++                Operand::IdRef(elem) => *elem,
++                _ => return None,
++            };
++            component_int_shape(defs, elem)
++        }
++        _ => None,
++    }
++}
++
+ fn is_float_type_live(ctx: &Ctx, ty: Word) -> bool {
+     type_def_of(ctx, ty).is_some_and(|def| def.class.opcode == Op::TypeFloat)
+ }
+diff --git a/src/passes/stage_input/air_layout.rs b/src/passes/stage_input/air_layout.rs
+index c145cb5..fe0d2a8 100644
+--- a/src/passes/stage_input/air_layout.rs
++++ b/src/passes/stage_input/air_layout.rs
+@@ -79,12 +79,98 @@ pub(in crate::passes) fn fragment_varying_interface_type(
+     defs: &HashMap<Word, Instruction>,
+ ) -> Word {
+     let Some(name) = frag.and_then(|meta| meta.varying_type(loc)) else {
+-        return ty;
++        return widened_half_stage_io_type(ctx, defs, ty).unwrap_or(ty);
+     };
+-    let Some((bits, signed, lanes)) = air_integer_type_shape(name) else {
+-        return ty;
+-    };
+-    integer_interface_type_like(ctx, ty, bits, signed, lanes, defs).unwrap_or(ty)
++    if let Some((bits, signed, lanes)) = air_integer_type_shape(name) {
++        return integer_interface_type_like(ctx, ty, bits, signed, lanes, defs).unwrap_or(ty);
++    }
++    widened_half_stage_io_type(ctx, defs, ty).unwrap_or(ty)
++}
++
++pub(in crate::passes) fn vertex_varying_interface_type(
++    ctx: &mut Ctx,
++    ty: Word,
++    defs: &HashMap<Word, Instruction>,
++) -> Word {
++    widened_half_stage_io_type(ctx, defs, ty).unwrap_or(ty)
++}
++
++pub(in crate::passes) fn stage_io_needs_float_convert(
++    ctx: &Ctx,
++    defs: &HashMap<Word, Instruction>,
++    src_ty: Word,
++    dst_ty: Word,
++) -> bool {
++    matches!(
++        (
++            float_component_width_live(ctx, defs, src_ty),
++            float_component_width_live(ctx, defs, dst_ty)
++        ),
++        (Some(src), Some(dst)) if src != dst
++    )
++}
++
++fn widened_half_stage_io_type(
++    ctx: &mut Ctx,
++    defs: &HashMap<Word, Instruction>,
++    ty: Word,
++) -> Option<Word> {
++    let def = defs.get(&ty)?;
++    match def.class.opcode {
++        Op::TypeFloat if type_float_width(defs, ty) == Some(16) => Some(ctx.ty_float()),
++        Op::TypeVector => {
++            let elem = match def.operands.first()? {
++                Operand::IdRef(elem) => *elem,
++                _ => return None,
++            };
++            if type_float_width(defs, elem) != Some(16) {
++                return None;
++            }
++            let lanes = match def.operands.get(1)? {
++                Operand::LiteralBit32(lanes) => *lanes,
++                _ => return None,
++            };
++            (1..=4).contains(&lanes).then(|| ctx.ty_vecf(lanes))
++        }
++        _ => None,
++    }
++}
++
++fn float_component_width_live(
++    ctx: &Ctx,
++    defs: &HashMap<Word, Instruction>,
++    ty: Word,
++) -> Option<u32> {
++    let def = type_def_live(ctx, defs, ty)?;
++    match def.class.opcode {
++        Op::TypeFloat => match def.operands.first() {
++            Some(Operand::LiteralBit32(width)) => Some(*width),
++            _ => Some(32),
++        },
++        Op::TypeVector => {
++            let elem = match def.operands.first()? {
++                Operand::IdRef(elem) => *elem,
++                _ => return None,
++            };
++            float_component_width_live(ctx, defs, elem)
++        }
++        _ => None,
++    }
++}
++
++fn type_def_live<'a>(
++    ctx: &'a Ctx,
++    defs: &'a HashMap<Word, Instruction>,
++    ty: Word,
++) -> Option<&'a Instruction> {
++    defs.get(&ty)
++        .or_else(|| ctx.new_globals.iter().find(|inst| inst.result_id == Some(ty)))
++        .or_else(|| {
++            ctx.module
++                .types_global_values
++                .iter()
++                .find(|inst| inst.result_id == Some(ty))
++        })
+ }
+ 
+ fn air_integer_type_shape(name: &str) -> Option<(u32, bool, u32)> {
+diff --git a/src/passes/stage_input/layout.rs b/src/passes/stage_input/layout.rs
+index 6a86c9d..1ced6b0 100644
+--- a/src/passes/stage_input/layout.rs
++++ b/src/passes/stage_input/layout.rs
+@@ -19,9 +19,10 @@ pub(super) fn include_existing_private_globals(ctx: &mut Ctx) {
+ }
+ 
+ impl Ctx {
+-    /// SPIR-V 1.4 requires all global variables referenced by the entry to be on the interface list,
+-    /// but 1.3 forbids non-Input/Output there. The llc backend emits version 1.4, so include buffers
+-    /// and resources too. We gate on header version.
++    /// Register descriptor/private globals that older SPIR-V 1.4-style inputs considered part of the
++    /// entry interface. Finalization filters OpEntryPoint back down to Input/Output variables after
++    /// the runtime-compatible header/version choice is made, while still keeping referenced descriptor
++    /// variables alive for DescriptorSet/Binding based binding.
+     pub(in crate::passes) fn interface_buffer_var(&mut self, var: Word) {
+         let v = self.module.header.as_ref().map(|h| h.version).unwrap_or(0);
+         // version word: high byte major, next minor. 1.4 = 0x00010400.
+diff --git a/src/passes/stage_input/mod.rs b/src/passes/stage_input/mod.rs
+index 233e853..46e5e7f 100644
+--- a/src/passes/stage_input/mod.rs
++++ b/src/passes/stage_input/mod.rs
+@@ -873,6 +873,15 @@ pub(super) fn build_stage_input(
+                 ctx.interface.push(var);
+                 if interface_ty == *pty {
+                     bindings.push((*pid, ParamBinding::LoadVar { var, ty: *pty }));
++                } else if stage_io_needs_float_convert(ctx, &defs, interface_ty, *pty) {
++                    bindings.push((
++                        *pid,
++                        ParamBinding::LoadVarConverted {
++                            var,
++                            load_ty: interface_ty,
++                            param_ty: *pty,
++                        },
++                    ));
+                 } else {
+                     bindings.push((
+                         *pid,
+@@ -1225,7 +1234,7 @@ pub(super) fn build_stage_input(
+         if block_decorated.insert(*struct_ty) {
+             decorate_block_struct(ctx, *struct_ty, &all_defs);
+         }
+-        ctx.interface_buffer_var(*var); // SPIR-V 1.4+ lists all globals; harmless for <=1.3.
++        ctx.interface_buffer_var(*var); // Finalization keeps descriptor vars live but off OpEntryPoint.
+     }
+ 
+     // Convert the module-scope static sampler `__air_sampler_state` (an AIR-embedded default sampler,
+diff --git a/src/passes/stage_output/mod.rs b/src/passes/stage_output/mod.rs
+index 8aad7b9..290860a 100644
+--- a/src/passes/stage_output/mod.rs
++++ b/src/passes/stage_output/mod.rs
+@@ -1,7 +1,9 @@
+ //! Return-value lowering, output variables, and static-sampler materialization.
+ 
+ use super::*;
+-use crate::passes::stage_input::{decorate_builtin, decorate_location, scalar_or_vector_component};
++use crate::passes::stage_input::{
++    decorate_builtin, decorate_location, scalar_or_vector_component, vertex_varying_interface_type,
++};
+ use crate::reflect::{COLOR_INPUT_BINDING_BASE, SAMPLER_BINDING_BASE};
+ 
+ fn fragment_output_location(frag: Option<&FragMeta>, member_idx: usize) -> Option<u32> {
+@@ -29,12 +31,35 @@ fn fragment_output_type(
+     defs: &HashMap<Word, Instruction>,
+ ) -> Word {
+     let Some(name) = frag.and_then(|meta| meta.render_target_type_name(member_idx as u32)) else {
+-        return ty;
++        return float32_render_target_interface_type(ctx, ty, defs).unwrap_or(ty);
+     };
+     if let Some((signed, lanes)) = air_integer_render_target_shape(name) {
+         return int32_render_target_interface_type(ctx, signed, lanes, ty, defs).unwrap_or(ty);
+     }
+-    ty
++    float32_render_target_interface_type(ctx, ty, defs).unwrap_or(ty)
++}
++
++fn float32_render_target_interface_type(
++    ctx: &mut Ctx,
++    ty: Word,
++    defs: &HashMap<Word, Instruction>,
++) -> Option<Word> {
++    let (component, lanes) = scalar_or_vector_component(defs, ty)?;
++    let def = defs.get(&component)?;
++    if def.class.opcode != Op::TypeFloat {
++        return None;
++    }
++    let bits = match def.operands.first()? {
++        Operand::LiteralBit32(bits) => *bits,
++        _ => return None,
++    };
++    if bits >= 32 {
++        return None;
++    }
++    Some(match lanes.unwrap_or(1) {
++        1 => ctx.ty_float(),
++        lanes => ctx.ty_vecf(lanes),
++    })
+ }
+ 
+ fn air_integer_render_target_shape(name: &str) -> Option<(bool, u32)> {
+@@ -136,9 +161,43 @@ fn value_for_store(
+             return converted;
+         }
+     }
++    if let (Some(src_bits), Some(dst_bits)) = (
++        float_component_bits_live(ctx, src_ty),
++        float_component_bits_live(ctx, dst_ty),
++    ) {
++        if src_bits != dst_bits {
++            let converted = ctx.module.fresh_id();
++            stores.push(Instruction::new(
++                Op::FConvert,
++                Some(dst_ty),
++                Some(converted),
++                vec![Operand::IdRef(value)],
++            ));
++            return converted;
++        }
++    }
+     bitcast_for_store(ctx, stores, value, src_ty, dst_ty)
+ }
+ 
++fn float_component_bits_live(ctx: &Ctx, ty: Word) -> Option<u32> {
++    let mut scalar_ty = ty;
++    let def = type_def_of(ctx, ty)?;
++    if def.class.opcode == Op::TypeVector {
++        scalar_ty = match def.operands.first()? {
++            Operand::IdRef(component) => *component,
++            _ => return None,
++        };
++    }
++    let def = type_def_of(ctx, scalar_ty)?;
++    if def.class.opcode != Op::TypeFloat {
++        return None;
++    }
++    match def.operands.first()? {
++        Operand::LiteralBit32(bits) => Some(*bits),
++        _ => None,
++    }
++}
++
+ fn int_component_shape_live(ctx: &Ctx, ty: Word) -> Option<(u32, bool)> {
+     let mut scalar_ty = ty;
+     let def = type_def_of(ctx, ty)?;
+@@ -540,7 +599,9 @@ pub(in crate::passes) fn rewrite_return(
+                             (OutKind::Builtin(builtin), _) => {
+                                 vertex_builtin_output_type(ctx, builtin, *mty)
+                             }
+-                            (OutKind::Location(_), _) => *mty,
++                            (OutKind::Location(_), _) => {
++                                vertex_varying_interface_type(ctx, *mty, defs)
++                            }
+                         };
+                         let var = make_output_var(ctx, output_ty);
+                         match kind {

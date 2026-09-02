@@ -1,0 +1,16 @@
+ M configs/devices/aarch64-softmmu/default.mak
+ M hw/display/Kconfig
+ M hw/display/meson.build
+ M hw/display/trace-events
+ M hw/intc/arm_gicv2m.c
+ M hw/vmapple/Kconfig
+ M hw/vmapple/aes.c
+ M hw/vmapple/bdif.c
+ M hw/vmapple/trace-events
+ M hw/vmapple/vmapple.c
+ M target/arm/cpregs.h
+ M target/arm/cpu.h
+ M target/arm/helper.c
+ M target/arm/tcg/pauth_helper.c
+ M target/arm/tcg/psci.c
+ M target/arm/trace-events

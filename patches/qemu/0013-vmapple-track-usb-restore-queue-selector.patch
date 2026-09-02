@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@example.com>
+Date: Tue, 1 Sep 2026 07:40:00 +0800
+Subject: [PATCH] hw/vmapple: track USB restore queue selector
+
+The first debug host-to-iBEC packet proved that the previous pending bit was too
+coarse.  iBEC writes 0x410 to select a USB restore queue before reading BUSY.
+After consuming the injected host-input packet it immediately selects queue 1 to
+send a response back to the host, but the device-wide pending bit made BUSY stay
+not-ready and iBEC timed out in its response path.
+
+Track the selected USB restore queue and only hold BUSY low for queue 0 while a
+host-input transfer is pending.  Other queues remain ready so iBEC can complete
+its host-output response path.  Name the adjacent queue notification register in
+the trace output as well; it remains a no-op for now, matching the previous
+behavior.
+
+Signed-off-by: Codex <codex@example.com>
+---
+ hw/vmapple/bdif.c | 17 ++++++++++++++---
+ 1 file changed, 14 insertions(+), 3 deletions(-)
+
+diff --git a/hw/vmapple/bdif.c b/hw/vmapple/bdif.c
+index 0000000000..0000000000 100644
+--- a/hw/vmapple/bdif.c
++++ b/hw/vmapple/bdif.c
+@@ -31,6 +31,7 @@ struct VMAppleBdifState {
+     BlockBackend *usb;
+     bool usb_restore_pending;
+     bool usb_restore_first_packet_used;
++    uint32_t usb_restore_selected_queue;
+     uint64_t usb_restore_pending_addr;
+     uint32_t usb_restore_pending_len;
+     uint32_t usb_restore_pending_flags;
+@@ -47,7 +48,9 @@ struct VMAppleBdifState {
+ #define REG_BUSY            0x10
+ #define REG_BUSY_READY        BIT(0)
+ #define REG_UNK2            0x400
++#define REG_QUEUE_NOTIFY    0x404
+ #define REG_CMD             0x408
++#define REG_QUEUE_SELECT    0x410
+ #define REG_NEXT_DEVICE     0x420
+ #define REG_UNK3            0x434
+ 
+@@ -209,8 +212,12 @@ static const char *bdif_reg_name(hwaddr offset)
+         return "busy";
+     case REG_UNK2:
+         return "unk2";
++    case REG_QUEUE_NOTIFY:
++        return "queue-notify";
+     case REG_CMD:
+         return "cmd";
++    case REG_QUEUE_SELECT:
++        return "queue-select";
+     case REG_NEXT_DEVICE:
+         return "next-device";
+     case REG_UNK3:
+@@ -242,9 +249,11 @@ static uint64_t bdif_read(void *opaque, hwaddr offset, unsigned size)
+         ret = present ? 0x420 : 0;
+         break;
+     case REG_BUSY:
+-        if (devid == DEVID_USB && s->usb_restore_pending) {
+-            ret = 0;
+-        } else {
++        if (devid == DEVID_USB &&
++            s->usb_restore_pending &&
++            s->usb_restore_selected_queue == 0) {
++            ret = 0;
++        } else {
+             ret = present ? REG_BUSY_READY : 0;
+         }
+         break;
+@@ -471,6 +479,9 @@ static void bdif_write(void *opaque, hwaddr offset,
+         if (blk) {
+             vblk_cmd(s, devid, blk, value, 0x0);
+         }
++        break;
++    case REG_QUEUE_SELECT:
++        s->usb_restore_selected_queue = devid == DEVID_USB ? value : 0;
+         break;
+     }
+ }
+-- 
+2.50.1

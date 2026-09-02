@@ -1,0 +1,131 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@example.com>
+Date: Tue, 1 Sep 2026 11:18:00 +0800
+Subject: [PATCH] hw/vmapple: implement opt-in BDIF block writes
+
+The restore iBEC does not only read from the AUX/ROOT BDIF devices.  After the
+host uploads RestoreTrustCache, RestoreRamDisk, or RestoreDeviceTree through the
+USB restore transport, iBEC persists accepted payloads into the AUX backing
+store with ordinary vblk write descriptors.
+
+The previous model left VBLK_DATA_FLAGS_WRITE as a stub and returned failure.
+That made otherwise accepted restore packets surface on serial as
+"Ramdisk image not valid" or "Device Tree image not valid" while the trace
+showed "aux write-unsupported" at offsets such as 0xa80000 and 0xa00000.
+
+Add an opt-in block-writes property.  When enabled, BDIF requests write
+permission on AUX/ROOT during realize, then handles write descriptors by copying
+guest memory into QEMU and calling blk_pwrite().  Keeping this opt-in preserves
+the upstream read-only boot behavior unless a restore smoke explicitly enables
+the writable AUX/ROOT path.
+
+Signed-off-by: Codex <codex@example.com>
+---
+ hw/vmapple/bdif.c       | 55 ++++++++++++++++++++++++++++++++++++++++-----
+ hw/vmapple/trace-events |  1 +
+ 2 files changed, 51 insertions(+), 5 deletions(-)
+
+diff --git a/hw/vmapple/bdif.c b/hw/vmapple/bdif.c
+index 0000000000..0000000000 100644
+--- a/hw/vmapple/bdif.c
++++ b/hw/vmapple/bdif.c
+@@ -42,5 +42,6 @@ struct VMAppleBdifState {
+     MemoryRegion mmio;
+     char *usb_restore_first_packet;
+     CharFrontend usb_restore_chr;
++    bool block_writes;
+ };
+ 
+@@ -648,12 +649,33 @@ static void vblk_cmd(VMAppleBdifState *s, uint64_t devid, BlockBackend *blk,
+                                   guest_pc);
+         }
+         break;
+     case VBLK_DATA_FLAGS_WRITE:
+-        /* Not needed, iBoot only reads */
+-        trace_bdif_vblk_error(bdif_devid_name(devid), "write-unsupported",
+-                              gp_addr, off, req.data.len, guest_pc);
+-        break;
++        if (!s->block_writes) {
++            trace_bdif_vblk_error(bdif_devid_name(devid), "write-disabled",
++                                  gp_addr, off, req.data.len, guest_pc);
++            break;
++        }
++        dma_result = dma_memory_read(&address_space_memory, req.data.addr, buf,
++                                     req.data.len, MEMTXATTRS_UNSPECIFIED);
++        if (dma_result != MEMTX_OK) {
++            trace_bdif_vblk_error(bdif_devid_name(devid), "write-data-dma",
++                                  gp_addr, req.data.addr, dma_result,
++                                  guest_pc);
++            goto out;
++        }
++        header = req.data.len >= sizeof(header) ? ldq_le_p(buf) : 0;
++        r = blk_pwrite(blk, off, req.data.len, buf, 0);
++        trace_bdif_vblk_write(bdif_devid_name(devid),
++                              req.data.addr, off, req.data.len, r,
++                              guest_pc, header);
++        if (r < 0) {
++            trace_bdif_vblk_error(bdif_devid_name(devid), "write-failed",
++                                  gp_addr, off, (uint64_t)r, guest_pc);
++            goto out;
++        }
++        ret = VBLK_RET_SUCCESS;
++        break;
+     default:
+         trace_bdif_vblk_error(bdif_devid_name(devid), "data-flags", gp_addr,
+                               req.data.flags, req.data.len, guest_pc);
+         break;
+@@ -719,14 +741,39 @@ static const Property bdif_properties[] = {
+     DEFINE_PROP_DRIVE("usb", VMAppleBdifState, usb),
+     DEFINE_PROP_STRING("usb-restore-first-packet", VMAppleBdifState, usb_restore_first_packet),
+     DEFINE_PROP_CHR("usb-restore-chardev", VMAppleBdifState, usb_restore_chr),
++    DEFINE_PROP_BOOL("block-writes", VMAppleBdifState, block_writes, false),
+ };
+ 
++static bool bdif_set_block_write_perm(BlockBackend *blk, const char *name,
++                                      Error **errp)
++{
++    int r;
++
++    if (!blk) {
++        return true;
++    }
++
++    r = blk_set_perm(blk, BLK_PERM_CONSISTENT_READ | BLK_PERM_WRITE,
++                     BLK_PERM_ALL, errp);
++    if (r < 0) {
++        error_prepend(errp, "vmapple-bdif %s backing: ", name);
++        return false;
++    }
++
++    return true;
++}
++
+ static void bdif_realize(DeviceState *dev, Error **errp)
+ {
+     VMAppleBdifState *s = VMAPPLE_BDIF(dev);
+ 
+-    (void)errp;
++    if (s->block_writes &&
++        (!bdif_set_block_write_perm(s->aux, "aux", errp) ||
++         !bdif_set_block_write_perm(s->root, "root", errp))) {
++        return;
++    }
++
+     if (qemu_chr_fe_backend_connected(&s->usb_restore_chr)) {
+         qemu_chr_fe_set_handlers(&s->usb_restore_chr,
+                                  bdif_usb_restore_chr_can_read,
+                                  bdif_usb_restore_chr_read, NULL, NULL,
+diff --git a/hw/vmapple/trace-events b/hw/vmapple/trace-events
+index 0000000000..0000000000 100644
+--- a/hw/vmapple/trace-events
++++ b/hw/vmapple/trace-events
+@@ -19,6 +19,7 @@ bdif_read(uint64_t offset, uint32_t size, uint64_t value) "offset=0x%"PRIx64" si
+ bdif_write(uint64_t offset, uint32_t size, uint64_t value) "offset=0x%"PRIx64" size=0x%x value=0x%"PRIx64
+ bdif_vblk_read(const char *dev, uint64_t addr, uint64_t offset, uint32_t len, int r, uint64_t pc, uint64_t header) "dev=%s addr=0x%"PRIx64" off=0x%"PRIx64" size=0x%x r=%d pc=0x%"PRIx64" head=0x%016"PRIx64
++bdif_vblk_write(const char *dev, uint64_t addr, uint64_t offset, uint32_t len, int r, uint64_t pc, uint64_t header) "dev=%s addr=0x%"PRIx64" off=0x%"PRIx64" size=0x%x r=%d pc=0x%"PRIx64" head=0x%016"PRIx64
+ bdif_access(const char *op, const char *dev, const char *reg, uint64_t offset, uint32_t size, uint64_t value, uint64_t pc) "%s dev=%s reg=%s offset=0x%"PRIx64" size=0x%x value=0x%"PRIx64" pc=0x%"PRIx64
+ bdif_vblk_cmd(const char *dev, uint64_t gp_addr, uint64_t pc) "dev=%s gp=0x%"PRIx64" pc=0x%"PRIx64
+ bdif_vblk_desc(const char *dev, const char *desc, uint64_t addr, uint32_t len, uint32_t flags, uint64_t pc) "dev=%s %s={addr=0x%"PRIx64" len=0x%x flags=0x%x} pc=0x%"PRIx64
+ bdif_vblk_sector(const char *dev, uint32_t sector, uint64_t offset, uint32_t data_len, uint32_t data_flags, uint64_t pc) "dev=%s sector=0x%x off=0x%"PRIx64" data_len=0x%x data_flags=0x%x pc=0x%"PRIx64
+-- 
+2.50.1

@@ -1,0 +1,23 @@
+From 6bc8af4f5cd3bdc4115f17c7f77cbdd7f2f26ce8 Mon Sep 17 00:00:00 2001
+From: MacVM Project <macvm@localhost>
+Date: Tue, 1 Sep 2026 18:30:00 +0800
+Subject: [PATCH] hw/display: keep MacVM Kconfig compatible with minikconf
+
+QEMU's minimal Kconfig parser does not implement help blocks.  Keep the device
+entry declarative so regenerating an existing build remains supported.
+---
+ hw/display/Kconfig | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/hw/display/Kconfig b/hw/display/Kconfig
+index dc45e53..a2d2e90 100644
+--- a/hw/display/Kconfig
++++ b/hw/display/Kconfig
+@@ -158,5 +158,3 @@ config MACVM_REIMS_VGPU
+     bool
+     depends on AARCH64 && TCG
+     default y
+-    help
+-      Linux host implementation of the VMApple PVG and IOSurface MMIO ABI.
+-- 
+2.50.1

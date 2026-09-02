@@ -1,0 +1,129 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@example.com>
+Date: Tue, 1 Sep 2026 05:02:00 +0800
+Subject: [PATCH] hw/vmapple: trace BDIF vblk command failures
+
+The restore USB backend now reaches the BDIF command register, but the existing
+vblk tracepoint only fires after a successfully decoded read request reaches
+blk_pread().  Add command/failure tracepoints around the request DMA, sector
+descriptor, data length, and flags checks so unsupported restore commands can be
+identified from QEMU logs.
+
+Also return immediately if the command request itself cannot be fetched.  The
+old path jumped to the common completion block and wrote through an uninitialized
+retval address.
+
+Signed-off-by: Codex <codex@example.com>
+---
+ hw/vmapple/bdif.c       | 35 +++++++++++++++++++++++++++++++----
+ hw/vmapple/trace-events |  4 ++++
+ 2 files changed, 35 insertions(+), 4 deletions(-)
+
+diff --git a/hw/vmapple/bdif.c b/hw/vmapple/bdif.c
+index 0000000000..0000000000 100644
+--- a/hw/vmapple/bdif.c
++++ b/hw/vmapple/bdif.c
+@@ -232,18 +232,30 @@ static void vblk_cmd(uint64_t devid, BlockBackend *blk, uint64_t gp_addr,
+     uint8_t ret = VBLK_RET_FAILED;
+     int r;
+     MemTxResult dma_result;
+-    uint64_t guest_pc;
+-    uint64_t header;
++    uint64_t guest_pc = bdif_guest_pc();
++    uint64_t header = 0;
+ 
+     dma_result = dma_memory_read(&address_space_memory, gp_addr,
+                                  &req, sizeof(req), MEMTXATTRS_UNSPECIFIED);
+     if (dma_result != MEMTX_OK) {
+-        goto out;
++        trace_bdif_vblk_error(bdif_devid_name(devid), "req-dma", gp_addr,
++                              dma_result, 0, guest_pc);
++        return;
+     }
+ 
+     le2cpu_req(&req);
++    trace_bdif_vblk_cmd(bdif_devid_name(devid), gp_addr, guest_pc);
++    trace_bdif_vblk_desc(bdif_devid_name(devid), "sector",
++                         req.sector.addr, req.sector.len, req.sector.flags,
++                         guest_pc);
++    trace_bdif_vblk_desc(bdif_devid_name(devid), "data", req.data.addr,
++                         req.data.len, req.data.flags, guest_pc);
++    trace_bdif_vblk_desc(bdif_devid_name(devid), "retval", req.retval.addr,
++                         req.retval.len, req.retval.flags, guest_pc);
+ 
+     if (req.sector.len != sizeof(sector)) {
++        trace_bdif_vblk_error(bdif_devid_name(devid), "sector-len", gp_addr,
++                              req.sector.len, sizeof(sector), guest_pc);
+         goto out;
+     }
+ 
+@@ -252,14 +264,20 @@ static void vblk_cmd(uint64_t devid, BlockBackend *blk, uint64_t gp_addr,
+                                  &sector, sizeof(sector),
+                                  MEMTXATTRS_UNSPECIFIED);
+     if (dma_result != MEMTX_OK) {
++        trace_bdif_vblk_error(bdif_devid_name(devid), "sector-dma", gp_addr,
++                              req.sector.addr, dma_result, guest_pc);
+         goto out;
+     }
+     le2cpu_sector(&sector);
+ 
+     off = sector.sector * 512ULL + static_off;
++    trace_bdif_vblk_sector(bdif_devid_name(devid), sector.sector, off,
++                           req.data.len, req.data.flags, guest_pc);
+ 
+     /* Sanity check that we're not allocating bogus sizes */
+     if (req.data.len > 128 * MiB) {
++        trace_bdif_vblk_error(bdif_devid_name(devid), "data-len", gp_addr,
++                              req.data.len, 128 * MiB, guest_pc);
+         goto out;
+     }
+ 
+@@ -267,23 +285,32 @@ static void vblk_cmd(uint64_t devid, BlockBackend *blk, uint64_t gp_addr,
+     switch (req.data.flags) {
+     case VBLK_DATA_FLAGS_READ:
+         r = blk_pread(blk, off, req.data.len, buf, 0);
+-        guest_pc = current_cpu ? current_cpu->cc->get_pc(current_cpu) : 0;
+         header = req.data.len >= sizeof(header) ? ldq_le_p(buf) : 0;
+         trace_bdif_vblk_read(bdif_devid_name(devid),
+                              req.data.addr, off, req.data.len, r,
+                              guest_pc, header);
+         if (r < 0) {
++            trace_bdif_vblk_error(bdif_devid_name(devid), "read-failed",
++                                  gp_addr, off, (uint64_t)r, guest_pc);
+             goto out;
+         }
+         dma_result = dma_memory_write(&address_space_memory, req.data.addr, buf,
+                                       req.data.len, MEMTXATTRS_UNSPECIFIED);
+         if (dma_result == MEMTX_OK) {
+             ret = VBLK_RET_SUCCESS;
++        } else {
++            trace_bdif_vblk_error(bdif_devid_name(devid), "data-dma",
++                                  gp_addr, req.data.addr, dma_result,
++                                  guest_pc);
+         }
+         break;
+     case VBLK_DATA_FLAGS_WRITE:
+         /* Not needed, iBoot only reads */
++        trace_bdif_vblk_error(bdif_devid_name(devid), "write-unsupported",
++                              gp_addr, off, req.data.len, guest_pc);
+         break;
+     default:
++        trace_bdif_vblk_error(bdif_devid_name(devid), "data-flags", gp_addr,
++                              req.data.flags, req.data.len, guest_pc);
+         break;
+     }
+ 
+diff --git a/hw/vmapple/trace-events b/hw/vmapple/trace-events
+index 0000000000..0000000000 100644
+--- a/hw/vmapple/trace-events
++++ b/hw/vmapple/trace-events
+@@ -21,3 +21,7 @@ bdif_read(uint64_t offset, uint32_t size, uint64_t value) "offset=0x%"PRIx64" si
+ bdif_write(uint64_t offset, uint32_t size, uint64_t value) "offset=0x%"PRIx64" size=0x%x value=0x%"PRIx64
+ bdif_vblk_read(const char *dev, uint64_t addr, uint64_t offset, uint32_t len, int r, uint64_t pc, uint64_t header) "dev=%s addr=0x%"PRIx64" off=0x%"PRIx64" size=0x%x r=%d pc=0x%"PRIx64" head=0x%016"PRIx64
+ bdif_access(const char *op, const char *dev, const char *reg, uint64_t offset, uint32_t size, uint64_t value, uint64_t pc) "%s dev=%s reg=%s offset=0x%"PRIx64" size=0x%x value=0x%"PRIx64" pc=0x%"PRIx64
++bdif_vblk_cmd(const char *dev, uint64_t gp_addr, uint64_t pc) "dev=%s gp=0x%"PRIx64" pc=0x%"PRIx64
++bdif_vblk_desc(const char *dev, const char *desc, uint64_t addr, uint32_t len, uint32_t flags, uint64_t pc) "dev=%s %s={addr=0x%"PRIx64" len=0x%x flags=0x%x} pc=0x%"PRIx64
++bdif_vblk_sector(const char *dev, uint32_t sector, uint64_t offset, uint32_t data_len, uint32_t data_flags, uint64_t pc) "dev=%s sector=0x%x off=0x%"PRIx64" data_len=0x%x data_flags=0x%x pc=0x%"PRIx64
++bdif_vblk_error(const char *dev, const char *reason, uint64_t gp_addr, uint64_t detail0, uint64_t detail1, uint64_t pc) "dev=%s reason=%s gp=0x%"PRIx64" detail0=0x%"PRIx64" detail1=0x%"PRIx64" pc=0x%"PRIx64
+-- 
+2.50.1

@@ -1,0 +1,682 @@
+Subject: [PATCH] Compose MRT, framebuffer fetch and depth attachments consistently
+
+Keep render-pass and framebuffer attachment counts aligned on resident and pooled
+paths. Enable independentBlend only when supported, reject incompatible per-target
+states otherwise, and release dedicated MRT memory at pool teardown.
+
+Regression: an isolated fetch+MRT draw reproduced Boot115's SIGSEGV at the same
+lavapipe instruction (ELF offset 0x7c4c8). The 24-case matrix verifies primary and
+secondary pixel content; Vulkan validation is clean for the targeted MRT suite.
+
+--- a/crates/reims-vgpu/src/backend/vulkan/engine/exec.rs
++++ b/crates/reims-vgpu/src/backend/vulkan/engine/exec.rs
+@@ -63,12 +63,20 @@
+     if !dump_pipeline_attempts_enabled() {
+         return;
+     }
+-    let vert_path = spv_dump_path("pipeline-attempt", "vert", req.vert_spirv.as_ref().as_slice())
+-        .map(|p| p.display().to_string())
+-        .unwrap_or_else(|| "-".to_string());
+-    let frag_path = spv_dump_path("pipeline-attempt", "frag", req.frag_spirv.as_ref().as_slice())
+-        .map(|p| p.display().to_string())
+-        .unwrap_or_else(|| "-".to_string());
++    let vert_path = spv_dump_path(
++        "pipeline-attempt",
++        "vert",
++        req.vert_spirv.as_ref().as_slice(),
++    )
++    .map(|p| p.display().to_string())
++    .unwrap_or_else(|| "-".to_string());
++    let frag_path = spv_dump_path(
++        "pipeline-attempt",
++        "frag",
++        req.frag_spirv.as_ref().as_slice(),
++    )
++    .map(|p| p.display().to_string())
++    .unwrap_or_else(|| "-".to_string());
+     crate::observe::fail(format!(
+         "vk_pipeline_shader_attempt geom={}x{} vtx={} first={} inst={:?} base_inst={} indexed={} attrs={} sbuf={} simg={} samp={} sec={} depth={} color_input={} out_bgra={} vert_words={} frag_words={} vert_spv={} frag_spv={}",
+         req.width,
+@@ -1056,15 +1064,6 @@
+     }
+     pass_key.secondary_count = req.secondary_targets.len() as u8;
+     pass_key.color_input = req.color_input;
+-    // Depth is opt-in per draw (only a non-trivial MTLDepthStencilState reaches
+-    // here). Combining it with MRT is not yet supported — the ad-hoc MRT
+-    // framebuffer would need the depth view appended and the pass rebuilt; no
+-    // known workload does both, so reject rather than silently drop depth.
+-    if req.depth.is_some() && is_mrt {
+-        return Err(DrawError::Unsupported(
+-            super::reason::DrawReason::DepthWithSecondaryAttachments,
+-        ));
+-    }
+     if let Some(d) = &req.depth {
+         pass_key.depth = Some(super::caches::DepthAttachKey {
+             load: d.load,
+@@ -1332,28 +1331,28 @@
+     // to barrier prior sampled reads and to mark ready afterward.
+     let mut mrt_secondaries: Vec<(super::types::TargetIdentity, vk::Image, vk::ImageLayout)> =
+         Vec::new();
+-    // Transient depth attachment (image, memory, view, ad-hoc framebuffer) —
++    // Transient depth attachment (image, memory, view) —
+     // owned for exactly this draw, disposed deferred after submit. `None` on the
+     // 2D path so nothing changes there.
+-    let mut transient_depth: Option<(vk::Image, vk::DeviceMemory, vk::ImageView, vk::Framebuffer)> =
+-        None;
++    let mut transient_depth: Option<(vk::Image, vk::DeviceMemory, vk::ImageView)> = None;
+     let mut color_input_snapshot: Option<SampledSlot> = None;
+-    let acquire_color_input_snapshot = |pools: &mut ResourcePools| -> Result<SampledSlot, DrawError> {
+-        pools.acquire_sampled(
+-            ctx,
+-            req.width,
+-            req.height,
+-            1,
+-            false,
+-            false,
+-            false,
+-            false,
+-            super::super::translate::pixel::resident_color(output_bgra),
+-            crate::contract::pixel_format::SwizzlePlan::default(),
+-            counters,
+-        )
+-    };
+-    let (target_image, target_fb, target_old_layout, target_view) =
++    let acquire_color_input_snapshot =
++        |pools: &mut ResourcePools| -> Result<SampledSlot, DrawError> {
++            pools.acquire_sampled(
++                ctx,
++                req.width,
++                req.height,
++                1,
++                false,
++                false,
++                false,
++                false,
++                super::super::translate::pixel::resident_color(output_bgra),
++                crate::contract::pixel_format::SwizzlePlan::default(),
++                counters,
++            )
++        };
++    let (target_image, primary_slot_fb, target_old_layout, target_view) =
+         if let Some(identity) = &req.target_identity {
+             let gen = identity.generation();
+             let t = pools.registry_ensure(
+@@ -1375,86 +1374,7 @@
+                     },
+                 ));
+             }
+-            let primary_image = t.image;
+-            let primary_view = t.view;
+-            let primary_layout = t.layout;
+-            let primary_slot_fb = t.framebuffer;
+-            if is_mrt {
+-                // Ensure each secondary resident and collect its view for the MRT
+-                // framebuffer. Recently-ensured residents sit at the back of the
+-                // LRU order, so a later secondary's capacity sweep (front-first)
+-                // cannot evict the primary or an earlier secondary in this draw.
+-                let mut views = vec![primary_view];
+-                for sec in &req.secondary_targets {
+-                    let old_layout = pools
+-                        .registry_get(&sec.identity)
+-                        .map(|s| s.layout)
+-                        .unwrap_or(vk::ImageLayout::UNDEFINED);
+-                    let (img, view) = pools.registry_ensure_color(
+-                        ctx,
+-                        sec.identity.clone(),
+-                        sec.width,
+-                        sec.height,
+-                        sec.identity.generation(),
+-                        sec.format,
+-                        counters,
+-                    )?;
+-                    views.push(view);
+-                    mrt_secondaries.push((sec.identity.clone(), img, old_layout));
+-                }
+-                let fb = pools.create_mrt_framebuffer(
+-                    ctx,
+-                    render_pass,
+-                    &views,
+-                    req.width,
+-                    req.height,
+-                    counters,
+-                )?;
+-                (primary_image, fb, primary_layout, primary_view)
+-            } else if req.depth.is_some() {
+-                let (dimg, dmem, dview) = pools.create_transient_depth(
+-                    ctx,
+-                    req.width,
+-                    req.height,
+-                    req.depth.and_then(|d| d.stencil).is_some(),
+-                    counters,
+-                )?;
+-                let mut views = vec![primary_view];
+-                if req.color_input {
+-                    let snapshot = acquire_color_input_snapshot(pools)?;
+-                    views.push(snapshot.view);
+-                    color_input_snapshot = Some(snapshot);
+-                }
+-                views.push(dview);
+-                let fb = pools.create_mrt_framebuffer(
+-                    ctx,
+-                    render_pass,
+-                    &views,
+-                    req.width,
+-                    req.height,
+-                    counters,
+-                )?;
+-                transient_depth = Some((dimg, dmem, dview, fb));
+-                (primary_image, fb, primary_layout, primary_view)
+-            } else if req.color_input {
+-                // Fetch reads a pass-before snapshot attachment, while slot 0
+-                // remains an ordinary color target. Same-image subpass feedback
+-                // is driver-sensitive and does not match Metal's old-dest read
+-                // semantics reliably on llvmpipe.
+-                let snapshot = acquire_color_input_snapshot(pools)?;
+-                let fb = pools.create_mrt_framebuffer(
+-                    ctx,
+-                    render_pass,
+-                    &[primary_view, snapshot.view],
+-                    req.width,
+-                    req.height,
+-                    counters,
+-                )?;
+-                color_input_snapshot = Some(snapshot);
+-                (primary_image, fb, primary_layout, primary_view)
+-            } else {
+-                (primary_image, primary_slot_fb, primary_layout, primary_view)
+-            }
++            (t.image, t.framebuffer, t.layout, t.view)
+         } else {
+             let target_key = TargetKey {
+                 width: req.width,
+@@ -1465,48 +1385,53 @@
+             // its cached framebuffer). For a depth draw, build a fresh ad-hoc
+             // framebuffer [color, depth] under the depth `render_pass`.
+             let t = pools.acquire_target(ctx, target_key, primary_pass, counters)?;
+-            let (pool_image, pool_view, pool_fb) = (t.image, t.view, t.framebuffer);
+-            if req.depth.is_some() {
+-                let (dimg, dmem, dview) = pools.create_transient_depth(
+-                    ctx,
+-                    req.width,
+-                    req.height,
+-                    req.depth.and_then(|d| d.stencil).is_some(),
+-                    counters,
+-                )?;
+-                let mut views = vec![pool_view];
+-                if req.color_input {
+-                    let snapshot = acquire_color_input_snapshot(pools)?;
+-                    views.push(snapshot.view);
+-                    color_input_snapshot = Some(snapshot);
+-                }
+-                views.push(dview);
+-                let fb = pools.create_mrt_framebuffer(
+-                    ctx,
+-                    render_pass,
+-                    &views,
+-                    req.width,
+-                    req.height,
+-                    counters,
+-                )?;
+-                transient_depth = Some((dimg, dmem, dview, fb));
+-                (pool_image, fb, vk::ImageLayout::UNDEFINED, pool_view)
+-            } else if req.color_input {
+-                let snapshot = acquire_color_input_snapshot(pools)?;
+-                let fb = pools.create_mrt_framebuffer(
+-                    ctx,
+-                    render_pass,
+-                    &[pool_view, snapshot.view],
+-                    req.width,
+-                    req.height,
+-                    counters,
+-                )?;
+-                color_input_snapshot = Some(snapshot);
+-                (pool_image, fb, vk::ImageLayout::UNDEFINED, pool_view)
+-            } else {
+-                (pool_image, pool_fb, vk::ImageLayout::UNDEFINED, pool_view)
+-            }
++            (t.image, t.framebuffer, vk::ImageLayout::UNDEFINED, t.view)
+         };
++    // The pass, clear values and framebuffer share one attachment order:
++    // primary, optional fetch snapshot, secondaries, optional depth. These
++    // features compose; choosing mutually exclusive MRT/depth/fetch branches
++    // omitted views and handed the driver a framebuffer shorter than its pass.
++    // Build the same layout for both resident and pooled primary targets.
++    let ad_hoc_framebuffer = is_mrt || req.depth.is_some() || req.color_input;
++    let target_fb = if ad_hoc_framebuffer {
++        let mut views = vec![target_view];
++        if req.color_input {
++            let snapshot = acquire_color_input_snapshot(pools)?;
++            views.push(snapshot.view);
++            color_input_snapshot = Some(snapshot);
++        }
++        for sec in &req.secondary_targets {
++            let old_layout = pools
++                .registry_get(&sec.identity)
++                .map(|s| s.layout)
++                .unwrap_or(vk::ImageLayout::UNDEFINED);
++            let (img, view) = pools.registry_ensure_color(
++                ctx,
++                sec.identity.clone(),
++                sec.width,
++                sec.height,
++                sec.identity.generation(),
++                sec.format,
++                counters,
++            )?;
++            views.push(view);
++            mrt_secondaries.push((sec.identity.clone(), img, old_layout));
++        }
++        if let Some(depth) = req.depth {
++            let (image, memory, view) = pools.create_transient_depth(
++                ctx,
++                req.width,
++                req.height,
++                depth.stencil.is_some(),
++                counters,
++            )?;
++            views.push(view);
++            transient_depth = Some((image, memory, view));
++        }
++        pools.create_mrt_framebuffer(ctx, render_pass, &views, req.width, req.height, counters)?
++    } else {
++        primary_slot_fb
++    };
+     // GPU seed source: resolved after registry_ensure (which protects it from
+     // the capacity sweep) so the handle cannot be destroyed under this draw.
+     // Every rejection is a distinct named error — the runtime pre-checks
+@@ -1982,7 +1907,6 @@
+         None
+     };
+ 
+-
+     // Seed upload (CPU import).
+     if let Some(seed) = &seed_slot {
+         let (src_stage, src_access) =
+@@ -2252,7 +2176,8 @@
+             let target_back_to_color = [vk::ImageMemoryBarrier::default()
+                 .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+                 .dst_access_mask(
+-                    vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
++                    vk::AccessFlags::COLOR_ATTACHMENT_READ
++                        | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                 )
+                 .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                 .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+@@ -2289,7 +2214,6 @@
+         }
+     }
+ 
+-
+     // Resident samples: transition the persistent target in place. Duplicate
+     // bindings of one target share the same image and therefore one barrier.
+     let mut transitioned_resident = std::collections::HashSet::new();
+@@ -2737,14 +2661,13 @@
+     // and are freed once those retire. Disposing BEFORE this point would
+     // immediate-free them (this slot is not yet pending, so it is not in the
+     // open mask) while the just-submitted CB still references them → GPU fault.
+-    if is_mrt || (req.color_input && transient_depth.is_none()) {
++    if ad_hoc_framebuffer {
+         pools.dispose(
+             &ctx.device,
+             super::pools::DeferredHandle::Framebuffer(target_fb),
+         );
+     }
+-    if let Some((dimg, dmem, dview, dfb)) = transient_depth {
+-        pools.dispose(&ctx.device, super::pools::DeferredHandle::Framebuffer(dfb));
++    if let Some((dimg, dmem, dview)) = transient_depth {
+         pools.dispose(
+             &ctx.device,
+             super::pools::DeferredHandle::Image {
+--- a/crates/reims-vgpu/src/backend/vulkan/engine/caches.rs
++++ b/crates/reims-vgpu/src/backend/vulkan/engine/caches.rs
+@@ -1072,6 +1072,13 @@
+                 key.color_write_mask[slot + 1],
+             ));
+         }
++        if !ctx.features.supports_attachment_blend_states(&blend_att) {
++            let reason = super::reason::DrawReason::IndependentBlendUnsupported;
++            crate::observe::Emit::decline("vk_engine_pipeline", &reason).fail();
++            let err = DrawError::Unsupported(reason);
++            self.pipelines.insert_negative(key.clone(), err.clone());
++            return Err(err);
++        }
+         let blend_constants = key
+             .blend
+             .map(|b| b.constants.map(f32::from_bits))
+--- a/crates/reims-vgpu/src/backend/vulkan/engine/reason.rs
++++ b/crates/reims-vgpu/src/backend/vulkan/engine/reason.rs
+@@ -37,10 +37,8 @@
+     GuestRunSampledNot2d { binding: u32 },
+     /// More MRT secondary attachments than the render pass can carry.
+     SecondaryAttachmentCap { requested: usize, cap: usize },
+-    /// A depth test combined with MRT secondaries — the depth attachment is
+-    /// appended after the secondaries and the two paths have not been proven
+-    /// together.
+-    DepthWithSecondaryAttachments,
++    /// Per-attachment blend states differ but independentBlend is unavailable.
++    IndependentBlendUnsupported,
+     /// The device does not advertise `samplerAnisotropy` and the guest sampler
+     /// asked for it.
+     SamplerAnisotropyUnsupported,
+@@ -122,7 +120,7 @@
+             Self::ResidentSampledNot2d { .. } => "resident_sampled_not_2d",
+             Self::GuestRunSampledNot2d { .. } => "guest_run_sampled_not_2d",
+             Self::SecondaryAttachmentCap { .. } => "secondary_attachment_cap",
+-            Self::DepthWithSecondaryAttachments => "depth_with_secondary_attachments",
++            Self::IndependentBlendUnsupported => "independent_blend_unsupported",
+             Self::SamplerAnisotropyUnsupported => "sampler_anisotropy_unsupported",
+             Self::SamplerMirrorClampToEdgeUnsupported => "sampler_mirror_clamp_to_edge_unsupported",
+             Self::DualSourceBlendUnsupported => "dual_source_blend_unsupported",
+@@ -257,7 +255,7 @@
+             requested: 0,
+             cap: 0,
+         },
+-        DrawReason::DepthWithSecondaryAttachments,
++        DrawReason::IndependentBlendUnsupported,
+         DrawReason::SamplerAnisotropyUnsupported,
+         DrawReason::SamplerMirrorClampToEdgeUnsupported,
+         DrawReason::ConstantVertexAttribute,
+--- a/crates/reims-vgpu/src/backend/vulkan/caps/device_features.rs
++++ b/crates/reims-vgpu/src/backend/vulkan/caps/device_features.rs
+@@ -156,6 +156,9 @@
+     /// an extension, but not mandatory either — so it is asked rather than
+     /// assumed, and the pipeline path declines by name where it is absent.
+     pub dual_src_blend: bool,
++    /// Independent per-color-attachment blend state and write masks for MRT.
++    /// Optional in core Vulkan; queried and enabled together.
++    pub independent_blend: bool,
+     /// `VK_EXT_attachment_feedback_loop_layout`, required for the framebuffer
+     /// fetch path that binds attachment 0 both as a color target and as the
+     /// fragment shader's input attachment. Without the extension/layout, some
+@@ -186,12 +189,36 @@
+             .shader_storage_image_extended_formats(self.storage_image_extended_formats)
+             .shader_storage_image_write_without_format(self.storage_image_write_without_format)
+             .dual_src_blend(self.dual_src_blend)
++            .independent_blend(self.independent_blend)
+     }
+ 
++    /// Without independentBlend every VkPipelineColorBlendAttachmentState
++    /// must be identical (VUID-pAttachments-00605), including masked channels.
++    pub fn supports_attachment_blend_states(
++        &self,
++        states: &[vk::PipelineColorBlendAttachmentState],
++    ) -> bool {
++        if self.independent_blend || states.len() < 2 {
++            return true;
++        }
++        let fields = |s: &vk::PipelineColorBlendAttachmentState| {
++            (
++                s.blend_enable,
++                s.src_color_blend_factor,
++                s.dst_color_blend_factor,
++                s.color_blend_op,
++                s.src_alpha_blend_factor,
++                s.dst_alpha_blend_factor,
++                s.alpha_blend_op,
++                s.color_write_mask,
++            )
++        };
++        states[1..].iter().all(|s| fields(s) == fields(&states[0]))
++    }
++
+     /// The Vulkan 1.1 features to enable.
+     pub fn enabled_vulkan11(&self) -> vk::PhysicalDeviceVulkan11Features<'static> {
+-        vk::PhysicalDeviceVulkan11Features::default()
+-            .storage_buffer16_bit_access(self.storage16)
++        vk::PhysicalDeviceVulkan11Features::default().storage_buffer16_bit_access(self.storage16)
+     }
+ 
+     /// The Vulkan 1.2 features to enable.
+@@ -341,6 +368,7 @@
+         robust_buffer_access: supported.robust_buffer_access == vk::TRUE,
+         sampler_anisotropy: supported.sampler_anisotropy == vk::TRUE,
+         dual_src_blend: supported.dual_src_blend == vk::TRUE,
++        independent_blend: supported.independent_blend == vk::TRUE,
+         max_sampler_anisotropy: props.limits.max_sampler_anisotropy.max(1.0),
+         max_image_dimension_2d: props
+             .limits
+@@ -405,6 +433,7 @@
+             shader_output_viewport_index: true,
+             mirror_clamp_to_edge: MirrorClampToEdge::Core12,
+             dual_src_blend: true,
++            independent_blend: true,
+             attachment_feedback_loop_layout: false,
+         }
+     }
+@@ -429,11 +458,45 @@
+         // The default is "not supported", so a `DeviceFeatures` built without a
+         // query never claims a capability it has not checked for.
+         assert!(!DeviceFeatures::default().dual_src_blend);
++    }
++
++    #[test]
++    fn independent_blend_enable_and_unsupported_gate_cover_every_attachment_field() {
++        let supported = all_supported();
++        let without = DeviceFeatures {
++            independent_blend: false,
++            ..supported
++        };
++        assert_eq!(supported.enabled_features().independent_blend, vk::TRUE);
++        assert_eq!(without.enabled_features().independent_blend, vk::FALSE);
++        assert!(!DeviceFeatures::default().independent_blend);
++        let base = vk::PipelineColorBlendAttachmentState::default();
++        assert!(without.supports_attachment_blend_states(&[]));
++        assert!(without.supports_attachment_blend_states(&[base]));
++        assert!(without.supports_attachment_blend_states(&[base, base, base]));
++        for changed in [
++            base.blend_enable(true),
++            base.src_color_blend_factor(vk::BlendFactor::ONE),
++            base.dst_color_blend_factor(vk::BlendFactor::ONE),
++            base.color_blend_op(vk::BlendOp::MAX),
++            base.src_alpha_blend_factor(vk::BlendFactor::ONE),
++            base.dst_alpha_blend_factor(vk::BlendFactor::ONE),
++            base.alpha_blend_op(vk::BlendOp::MAX),
++            base.color_write_mask(vk::ColorComponentFlags::R),
++        ] {
++            assert!(!without.supports_attachment_blend_states(&[base, base, changed]));
++            assert!(supported.supports_attachment_blend_states(&[base, base, changed]));
++        }
+     }
+ 
+     #[test]
+     fn promoted_storage_and_float_features_use_core_structs() {
+-        assert_eq!(all_supported().enabled_vulkan11().storage_buffer16_bit_access, vk::TRUE);
++        assert_eq!(
++            all_supported()
++                .enabled_vulkan11()
++                .storage_buffer16_bit_access,
++            vk::TRUE
++        );
+         let enabled12 = all_supported().enabled_vulkan12();
+         assert_eq!(enabled12.storage_buffer8_bit_access, vk::TRUE);
+         assert_eq!(enabled12.shader_float16, vk::TRUE);
+@@ -446,7 +509,10 @@
+             int8: false,
+             ..all_supported()
+         };
+-        assert_eq!(without.enabled_vulkan11().storage_buffer16_bit_access, vk::FALSE);
++        assert_eq!(
++            without.enabled_vulkan11().storage_buffer16_bit_access,
++            vk::FALSE
++        );
+         let disabled12 = without.enabled_vulkan12();
+         assert_eq!(disabled12.storage_buffer8_bit_access, vk::FALSE);
+         assert_eq!(disabled12.shader_float16, vk::FALSE);
+--- a/crates/reims-vgpu/src/backend/vulkan/engine/pools/teardown.rs
++++ b/crates/reims-vgpu/src/backend/vulkan/engine/pools/teardown.rs
+@@ -81,10 +81,10 @@
+         for l in self.readback_leased.drain(..) {
+             release_buffer_slot(device, &mut self.host_slab, l.slot);
+         }
+-        // Sampled / target / registry images are slab-backed: destroy the image
+-        // + view handles here, but their memory belongs to shared blocks freed
+-        // once by `self.slab.destroy_all(device)` at the end — never a per-image
+-        // `vkFreeMemory` (that would double-free a block many images share).
++        // Sampled images are slab-backed. Targets can also have dedicated
++        // backing (registry_ensure_color); ask the slab by image identity before
++        // freeing a target's memory. Assuming every target is slab-backed leaks
++        // the dedicated MRT allocations, including recycled secondary images.
+         for s in self.sampled_free.drain() {
+             device.destroy_image_view(s.view, None);
+             device.destroy_image(s.image, None);
+@@ -92,6 +92,9 @@
+         for img in self.target_free.drain() {
+             device.destroy_image_view(img.view, None);
+             device.destroy_image(img.image, None);
++            if !self.slab.free_image(device, img.image) {
++                device.free_memory(img.memory, None);
++            }
+         }
+         for s in self.sampled_live.drain(..) {
+             device.destroy_image_view(s.view, None);
+@@ -122,12 +125,18 @@
+             device.destroy_framebuffer(t.framebuffer, None);
+             device.destroy_image_view(t.view, None);
+             device.destroy_image(t.image, None);
++            if !self.slab.free_image(device, t.image) {
++                device.free_memory(t.memory, None);
++            }
+         }
+         self.target_order.clear();
+         for (_, t) in self.registry.drain() {
+             device.destroy_framebuffer(t.framebuffer, None);
+             device.destroy_image_view(t.view, None);
+             device.destroy_image(t.image, None);
++            if !self.slab.free_image(device, t.image) {
++                device.free_memory(t.memory, None);
++            }
+         }
+         self.registry_order.clear();
+         // Free every slab block now that all slab-backed images are destroyed.
+--- a/crates/reims-vgpu/tests/vk_engine_parity.rs
++++ b/crates/reims-vgpu/tests/vk_engine_parity.rs
+@@ -2971,9 +2971,129 @@
+             near(r, 191) && near(g, 127) && near(b, 64) && near(a, 255),
+             "fetch: pixel {p} RGBA=({r},{g},{b},{a}); expected ~(191,127,64,255)"
+         );
++    }
++}
++
++/// Exercise the attachment layout independently of the guest command decoder.
++/// Fetch must read the primary seed, secondary clears must land in their own
++/// images, and depth must reject/accept the primary without changing that order.
++fn check_mrt_attachment_layout(resident: bool, fetch: bool, depth: Option<bool>, count: u32) {
++    let (v, plain) = triangle_spirv();
++    let f = if fetch {
++        translate_words("render_frag_fetch.air", Stage::Fragment)
++    } else {
++        plain
++    };
++    let (w, h) = (16, 16);
++    let mut req = engine_req(&v, &f, w, h);
++    req.color_input = fetch;
++    // Distinct from both shaders' output so ignoring Never cannot pass.
++    req.target_rgba8 = Some(std::sync::Arc::new(
++        [32, 96, 160, 255].repeat((w * h) as usize),
++    ));
++    if resident {
++        req.target_identity = Some(TargetIdentity::Surface {
++            id: 0x700,
++            width: w,
++            height: h,
++            generation: 1,
++        });
++    }
++    if let Some(accept) = depth {
++        req.depth = Some(DepthState {
++            test_enable: true,
++            write_enable: true,
++            compare: if accept {
++                SamplerCompareFunction::Always
++            } else {
++                SamplerCompareFunction::Never
++            },
++            clear_value: 1.0,
++            load: false,
++            stencil: None,
++        });
++    }
++    for n in 0..count {
++        req.secondary_targets.push(SecondaryColorTarget {
++            identity: TargetIdentity::Surface {
++                id: 0x701 + n,
++                width: w,
++                height: h,
++                generation: 1,
++            },
++            width: w,
++            height: h,
++            format: ash::vk::Format::R8G8B8A8_UNORM,
++            clear: [(n + 1) as f32 / 4.0, 0.0, 1.0, 1.0],
++            load: false,
++            blend: None,
++            // The fixture writes only location 0. A zero mask preserves each
++            // secondary clear rather than asserting an undefined shader output.
++            color_write_mask: engine::ColorWriteMask::new(0).unwrap(),
++        });
++    }
++    // Two submissions exercise cached passes and deferred framebuffer cleanup.
++    for _ in 0..2 {
++        let out = engine::execute_draw_request(&req).expect("MRT attachment layout draw");
++        let px = semantic_rgba(&out);
++        let expected = if depth == Some(false) {
++            [32, 96, 160, 255]
++        } else if fetch {
++            [223, 159, 95, 255]
++        } else {
++            [64, 128, 191, 255]
++        };
++        assert_eq!(px.len(), (w * h * 4) as usize);
++        for pixel in px.chunks_exact(4) {
++            assert!(
++                pixel
++                    .iter()
++                    .zip(expected)
++                    .all(|(&got, want)| near(got, want)),
++                "resident={resident} fetch={fetch} depth={depth:?} primary={pixel:?}"
++            );
++        }
++        for (n, sec) in req.secondary_targets.iter().enumerate() {
++            let pixels = engine::read_target(&sec.identity)
++                .expect("secondary readback")
++                .into_rgba8();
++            let expected = [((n + 1) * 255 / 4) as u8, 0, 255, 255];
++            assert_eq!(pixels.len(), (w * h * 4) as usize);
++            for pixel in pixels.chunks_exact(4) {
++                assert!(pixel.iter().zip(expected).all(|(&got, want)| near(got, want)),
++                    "resident={resident} fetch={fetch} depth={depth:?} secondary={n} pixel={pixel:?}");
++            }
++        }
+     }
+ }
+ 
++#[test]
++fn mrt_framebuffer_fetch_resident_regression() {
++    let _g = engine_test_session();
++    check_mrt_attachment_layout(true, true, None, 1);
++}
++
++#[test]
++fn mrt_framebuffer_fetch_pooled_regression() {
++    let _g = engine_test_session();
++    check_mrt_attachment_layout(false, true, None, 1);
++}
++
++#[test]
++fn mrt_depth_attachment_matrix() {
++    let _g = engine_test_session();
++    for resident in [false, true] {
++        for fetch in [false, true] {
++            for depth in [None, Some(false), Some(true)] {
++                for count in [1, 3] {
++                    engine::test_reset_engine();
++                    check_mrt_attachment_layout(resident, fetch, depth, count);
++                }
++            }
++        }
++    }
++}
++
+ /// An instrument, not a gate: how a draw's cost splits between a fixed
+ /// submit-and-wait floor and the bytes it moves.
+ ///

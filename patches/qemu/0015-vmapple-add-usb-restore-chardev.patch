@@ -1,0 +1,284 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@example.com>
+Date: Tue, 1 Sep 2026 09:38:00 +0800
+Subject: [PATCH] hw/vmapple: add USB restore chardev transport
+
+The restore iBEC now reaches a clean wait state on the USB BDIF transport: it
+posts host-to-guest receive buffers on queue 0 and guest-to-host packets on
+queue 1.  The previous debug hook could inject exactly one synthetic packet,
+but a real restore session needs a persistent byte stream that can feed
+subsequent host packets and receive iBEC responses.
+
+Expose an optional usb-restore-chardev frontend on vmapple-bdif.  Bytes read
+from the chardev are framed as Apple restore packets with a little-endian
+payload length followed by the two-byte endpoint/type header, then DMA-copied
+into the pending iBEC receive buffer.  Guest outbound packets are copied out of
+guest memory and written to the same chardev.
+
+The property is opt-in; when unset, the prior no-host-stream behavior remains
+unchanged and iBEC keeps waiting instead of consuming bogus zero packets.
+
+Signed-off-by: Codex <codex@example.com>
+---
+ hw/vmapple/bdif.c | 130 ++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 125 insertions(+), 5 deletions(-)
+
+diff --git a/hw/vmapple/bdif.c b/hw/vmapple/bdif.c
+index 0000000000..0000000000 100644
+--- a/hw/vmapple/bdif.c
++++ b/hw/vmapple/bdif.c
+@@ -16,12 +16,14 @@
+ #include "trace.h"
+ #include "hw/core/cpu.h"
+ #include "hw/core/qdev-properties.h"
++#include "hw/core/qdev-properties-system.h"
+ #include "hw/vmapple/vmapple.h"
+ #include "hw/core/sysbus.h"
+ #include "hw/block/block.h"
+ #include "qapi/error.h"
+ #include "system/block-backend.h"
+ #include "system/dma.h"
++#include "chardev/char-fe.h"
+ 
+ OBJECT_DECLARE_SIMPLE_TYPE(VMAppleBdifState, VMAPPLE_BDIF)
+ 
+@@ -37,8 +39,10 @@ struct VMAppleBdifState {
+     uint64_t usb_restore_pending_addr;
+     uint32_t usb_restore_pending_len;
+     uint32_t usb_restore_pending_flags;
++    GByteArray *usb_restore_rx;
+     MemoryRegion mmio;
+     char *usb_restore_first_packet;
++    CharFrontend usb_restore_chr;
+ };
+ 
+ #define VMAPPLE_BDIF_SIZE   0x00200000
+@@ -89,6 +93,7 @@ typedef struct VblkReq {
+ #define VBLK_RET_FAILED   1
+ 
+ #define VBLK_USB_RESTORE_FLAGS 0x00020001
++#define VBLK_USB_RESTORE_HEADER_LEN 6
+ #define VBLK_USB_RESTORE_MAX_PACKET (16 * MiB)
+ #define VBLK_USB_RESTORE_OUT_FLAGS 0x00000001
+ 
+@@ -230,7 +235,8 @@ static bool bdif_usb_restore_deliver_first_packet(VMAppleBdifState *s,
+     return true;
+ }
+ 
+-static void bdif_usb_restore_handle_out_packet(const VblkReq *req,
++static void bdif_usb_restore_handle_out_packet(VMAppleBdifState *s,
++                                               const VblkReq *req,
+                                                uint64_t gp_addr,
+                                                uint64_t guest_pc)
+ {
+@@ -259,6 +265,23 @@ static void bdif_usb_restore_handle_out_packet(const VblkReq *req,
+     trace_bdif_usb_restore_packet("guest-out", req->sector.addr,
+                                   req->sector.len, req->sector.len, header,
+                                   guest_pc);
++
++    if (qemu_chr_fe_backend_connected(&s->usb_restore_chr)) {
++        int packet_len = (int)req->sector.len;
++        int written = qemu_chr_fe_write(&s->usb_restore_chr, packet,
++                                        packet_len);
++
++        if (written == packet_len) {
++            trace_bdif_usb_restore_packet("chardev-out", req->sector.addr,
++                                          req->sector.len, req->sector.len,
++                                          header, guest_pc);
++        } else {
++            trace_bdif_vblk_error("usb", "usb-restore-chardev-write",
++                                  gp_addr, (uint64_t)(int64_t)written,
++                                  req->sector.len, guest_pc);
++        }
++        qemu_chr_fe_accept_input(&s->usb_restore_chr);
++    }
+ }
+ 
+ static BlockBackend *bdif_backend_for_devid(VMAppleBdifState *s,
+@@ -344,6 +367,100 @@ static void bdif_trace_access(const char *op, uint64_t devid, hwaddr offset,
+                       offset, size, value, bdif_guest_pc());
+ }
+ 
++static bool bdif_usb_restore_try_deliver_rx(VMAppleBdifState *s,
++                                            uint64_t guest_pc)
++{
++    uint32_t payload_len;
++    size_t packet_len;
++    uint64_t header = 0;
++    MemTxResult dma_result;
++
++    if (!s->usb_restore_pending || !s->usb_restore_rx ||
++        s->usb_restore_rx->len < VBLK_USB_RESTORE_HEADER_LEN) {
++        return false;
++    }
++
++    payload_len = ldl_le_p(s->usb_restore_rx->data);
++    if (payload_len > VBLK_USB_RESTORE_MAX_PACKET -
++                      VBLK_USB_RESTORE_HEADER_LEN) {
++        trace_bdif_vblk_error("usb", "usb-restore-chardev-len",
++                              s->usb_restore_pending_addr, payload_len,
++                              VBLK_USB_RESTORE_MAX_PACKET, guest_pc);
++        g_byte_array_set_size(s->usb_restore_rx, 0);
++        return false;
++    }
++
++    packet_len = payload_len + VBLK_USB_RESTORE_HEADER_LEN;
++    if (s->usb_restore_rx->len < packet_len) {
++        return false;
++    }
++
++    if (packet_len > s->usb_restore_pending_len) {
++        trace_bdif_vblk_error("usb", "usb-restore-chardev-capacity",
++                              s->usb_restore_pending_addr, packet_len,
++                              s->usb_restore_pending_len, guest_pc);
++        g_byte_array_remove_range(s->usb_restore_rx, 0, packet_len);
++        return false;
++    }
++
++    dma_result = dma_memory_write(&address_space_memory,
++                                  s->usb_restore_pending_addr,
++                                  s->usb_restore_rx->data, packet_len,
++                                  MEMTXATTRS_UNSPECIFIED);
++    if (dma_result != MEMTX_OK) {
++        trace_bdif_vblk_error("usb", "usb-restore-chardev-dma",
++                              s->usb_restore_pending_addr,
++                              s->usb_restore_pending_addr, dma_result,
++                              guest_pc);
++        g_byte_array_remove_range(s->usb_restore_rx, 0, packet_len);
++        return false;
++    }
++
++    memcpy(&header, s->usb_restore_rx->data,
++           MIN(packet_len, sizeof(header)));
++    trace_bdif_usb_restore_packet("chardev-in", s->usb_restore_pending_addr,
++                                  s->usb_restore_pending_len, packet_len,
++                                  header, guest_pc);
++    g_byte_array_remove_range(s->usb_restore_rx, 0, packet_len);
++    s->usb_restore_pending = false;
++    return true;
++}
++
++static int bdif_usb_restore_chr_can_read(void *opaque)
++{
++    (void)opaque;
++    return VBLK_USB_RESTORE_MAX_PACKET;
++}
++
++static void bdif_usb_restore_chr_read(void *opaque, const uint8_t *buf,
++                                      int size)
++{
++    VMAppleBdifState *s = opaque;
++    uint64_t guest_pc = bdif_guest_pc();
++
++    if (size <= 0) {
++        return;
++    }
++
++    if (!s->usb_restore_rx) {
++        s->usb_restore_rx = g_byte_array_new();
++    }
++
++    if (s->usb_restore_rx->len + size > VBLK_USB_RESTORE_MAX_PACKET) {
++        trace_bdif_vblk_error("usb", "usb-restore-chardev-overflow",
++                              s->usb_restore_pending_addr,
++                              s->usb_restore_rx->len + size,
++                              VBLK_USB_RESTORE_MAX_PACKET, guest_pc);
++        g_byte_array_set_size(s->usb_restore_rx, 0);
++        qemu_chr_fe_accept_input(&s->usb_restore_chr);
++        return;
++    }
++
++    g_byte_array_append(s->usb_restore_rx, buf, size);
++    bdif_usb_restore_try_deliver_rx(s, guest_pc);
++    qemu_chr_fe_accept_input(&s->usb_restore_chr);
++}
++
+ static uint64_t bdif_read(void *opaque, hwaddr offset, unsigned size)
+ {
+     VMAppleBdifState *s = opaque;
+@@ -362,6 +479,9 @@ static uint64_t bdif_read(void *opaque, hwaddr offset, unsigned size)
+         ret = present ? 0x420 : 0;
+         break;
+     case REG_BUSY:
++        if (devid == DEVID_USB) {
++            bdif_usb_restore_try_deliver_rx(s, bdif_guest_pc());
++        }
+         if (devid == DEVID_USB &&
+             s->usb_restore_pending &&
+             s->usb_restore_selected_queue == 0) {
+@@ -455,7 +575,8 @@ static void vblk_cmd(VMAppleBdifState *s, uint64_t devid, BlockBackend *blk,
+         trace_bdif_usb_restore_packet("pending", req.sector.addr,
+                                       req.sector.len, 0, 0, guest_pc);
+         if (bdif_usb_restore_deliver_first_packet(s, &req, gp_addr,
+-                                                  guest_pc)) {
++                                                  guest_pc) ||
++            bdif_usb_restore_try_deliver_rx(s, guest_pc)) {
+             return;
+         }
+ 
+@@ -467,7 +588,7 @@ static void vblk_cmd(VMAppleBdifState *s, uint64_t devid, BlockBackend *blk,
+     }
+ 
+     if (bdif_is_usb_restore_out_packet(devid, &req)) {
+-        bdif_usb_restore_handle_out_packet(&req, gp_addr, guest_pc);
++        bdif_usb_restore_handle_out_packet(s, &req, gp_addr, guest_pc);
+         return;
+     }
+ 
+@@ -582,6 +703,7 @@ static void bdif_init(Object *obj)
+ {
+     VMAppleBdifState *s = VMAPPLE_BDIF(obj);
+ 
++    s->usb_restore_rx = g_byte_array_new();
+     memory_region_init_io(&s->mmio, obj, &bdif_ops, obj,
+                          "VMApple Backdoor Interface", VMAPPLE_BDIF_SIZE);
+     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->mmio);
+@@ -592,14 +714,46 @@ static const Property bdif_properties[] = {
+     DEFINE_PROP_DRIVE("root", VMAppleBdifState, root),
+     DEFINE_PROP_DRIVE("usb", VMAppleBdifState, usb),
+     DEFINE_PROP_STRING("usb-restore-first-packet", VMAppleBdifState, usb_restore_first_packet),
++    DEFINE_PROP_CHR("usb-restore-chardev", VMAppleBdifState, usb_restore_chr),
+ };
+ 
++static void bdif_realize(DeviceState *dev, Error **errp)
++{
++    VMAppleBdifState *s = VMAPPLE_BDIF(dev);
++
++    (void)errp;
++    if (qemu_chr_fe_backend_connected(&s->usb_restore_chr)) {
++        qemu_chr_fe_set_handlers(&s->usb_restore_chr,
++                                 bdif_usb_restore_chr_can_read,
++                                 bdif_usb_restore_chr_read, NULL, NULL,
++                                 s, NULL, true);
++    }
++}
++
++static void bdif_unrealize(DeviceState *dev)
++{
++    VMAppleBdifState *s = VMAPPLE_BDIF(dev);
++
++    if (qemu_chr_fe_backend_connected(&s->usb_restore_chr)) {
++        qemu_chr_fe_set_handlers(&s->usb_restore_chr, NULL, NULL, NULL,
++                                 NULL, s, NULL, true);
++        qemu_chr_fe_deinit(&s->usb_restore_chr, false);
++    }
++
++    if (s->usb_restore_rx) {
++        g_byte_array_unref(s->usb_restore_rx);
++        s->usb_restore_rx = NULL;
++    }
++}
++
+ static void bdif_class_init(ObjectClass *klass, const void *data)
+ {
+     DeviceClass *dc = DEVICE_CLASS(klass);
+ 
+     dc->desc = "VMApple Backdoor Interface";
+     device_class_set_props(dc, bdif_properties);
++    dc->realize = bdif_realize;
++    dc->unrealize = bdif_unrealize;
+ }
+ 
+ static const TypeInfo bdif_info = {
+-- 
+2.50.1

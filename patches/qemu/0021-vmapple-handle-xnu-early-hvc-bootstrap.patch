@@ -1,0 +1,99 @@
+From 8d91d3ca962f52fd3ed9b2bce06266432785d2ee Mon Sep 17 00:00:00 2001
+From: MacVM Project <macvm@localhost>
+Date: Tue, 1 Sep 2026 13:40:00 +0800
+Subject: [PATCH] target/arm: handle vmapple XNU early HVC bootstrap call
+
+The restore path now reaches the macOS 26 kernel entry under the vmapple
+TCG machine.  The first XNU branch target sets up early page tables and
+then executes:
+
+    mov x0, #0xc1000000
+    hvc #0
+    cbnz x0, .
+
+With the vmapple `svc-a0-psci=on` restore mode, QEMU routes iBoot's
+SVC #0xa0 PSCI calls but no longer treats HVC as a PSCI conduit.  Since
+vmapple also disables EL2 for this TCG path, `pre_hvc()` raises UDEF and
+XNU vectors to a high VBAR before that address is executable in the
+current translation regime.
+
+Teach the SVC_A0 restore conduit to also accept normal HVC PSCI function
+IDs and the Apple/XNU early bootstrap HVC function 0xc1000000.  The Apple
+function is modeled as success (x0 = 0), which is exactly what XNU tests
+before enabling SCTLR_EL1 and continuing early boot.  Other unknown HVC
+calls remain architecturally handled instead of being swallowed.
+---
+ target/arm/tcg/psci.c | 39 +++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 37 insertions(+), 2 deletions(-)
+
+diff --git a/target/arm/tcg/psci.c b/target/arm/tcg/psci.c
+index ba90c0c7d5..681a98e655 100644
+--- a/target/arm/tcg/psci.c
++++ b/target/arm/tcg/psci.c
+@@ -26,6 +26,13 @@
+ #include "target/arm/trace.h"
+ #include "syndrome.h"
+ 
++#define QEMU_APPLE_XNU_BOOT_HVC 0xc1000000ULL
++
++static bool arm_is_vmapple_xnu_boot_hvc_function(uint64_t function_id)
++{
++    return function_id == QEMU_APPLE_XNU_BOOT_HVC;
++}
++
+ static bool arm_is_implemented_psci_function(uint64_t function_id)
+ {
+     switch (function_id) {
+@@ -61,6 +68,15 @@ static bool arm_is_iboot_svc_a0_psci_call(ARMCPU *cpu)
+            arm_is_implemented_psci_function(env->xregs[0]);
+ }
+ 
++static bool arm_is_vmapple_svc_a0_hvc_call(ARMCPU *cpu)
++{
++    CPUARMState *env = &cpu->env;
++
++    return is_a64(env) &&
++           (arm_is_implemented_psci_function(env->xregs[0]) ||
++            arm_is_vmapple_xnu_boot_hvc_function(env->xregs[0]));
++}
++
+ bool arm_is_psci_call(ARMCPU *cpu, int excp_type)
+ {
+     /*
+@@ -73,8 +89,10 @@ bool arm_is_psci_call(ARMCPU *cpu, int excp_type)
+ 
+     switch (excp_type) {
+     case EXCP_HVC:
+-        if (cpu->psci_conduit != QEMU_PSCI_CONDUIT_HVC) {
+-            return false;
++        if (cpu->psci_conduit == QEMU_PSCI_CONDUIT_SVC_A0) {
++            return arm_is_vmapple_svc_a0_hvc_call(cpu);
++        } else if (cpu->psci_conduit != QEMU_PSCI_CONDUIT_HVC) {
++            return false;
+         }
+         break;
+     case EXCP_SMC:
+@@ -120,6 +138,21 @@ void arm_handle_psci_call(ARMCPU *cpu)
+     trace_arm_psci_call(param[0], param[1], param[2], param[3],
+                         arm_cpu_mp_affinity(cpu));
+ 
++    if (is_a64(env) &&
++        syn_get_ec(env->exception.syndrome) == EC_AA64_HVC &&
++        FIELD_EX32(env->exception.syndrome, ISS_IMM16, IMM16) == 0 &&
++        arm_is_vmapple_xnu_boot_hvc_function(param[0])) {
++        /*
++         * macOS 26 XNU issues this early vmapple bootstrap HVC before
++         * enabling SCTLR_EL1.  On Apple hardware/hypervisor-backed vmapple
++         * this returns zero for success; under Linux TCG there is no EL2
++         * handler, so model the successful no-op path and let XNU continue
++         * to the following CBNZ success check.
++         */
++        ret = QEMU_PSCI_RET_SUCCESS;
++        goto err;
++    }
++
+     if ((param[0] & QEMU_PSCI_0_2_64BIT) && !is_a64(env)) {
+         ret = QEMU_PSCI_RET_NOT_SUPPORTED;
+         goto err;
+-- 
+2.51.0

@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@example.com>
+Date: Tue, 1 Sep 2026 17:10:00 +0800
+Subject: [PATCH] hw/vmapple: model BDIF queue notify status
+
+The restore iBEC bootx teardown path uses the BDIF register at offset 0x404 as
+a queue-notify/status register.  The USB backend lives in the 0x30100000
+device-id window, so this is the guest access at 0x30100404 seen in the live
+trace.
+
+Patch 0013 named REG_QUEUE_NOTIFY while tracing the restore queues, but the
+register remained semantic-only: reads fell through to the default all-ones
+value and writes were ignored.  iBEC clears the register by writing zero and
+then waits until a read returns zero.  With the old model the write never stuck,
+so the guest looped forever on 0xffffffff.
+
+Store one queue-notify value per BDIF backend and return the stored value on
+reads.  This keeps the existing root/aux/usb device windows separate, preserves
+absent-device reads as zero like the other BDIF registers, and makes iBEC's
+clear-and-poll contract observable through the existing bdif_access trace.
+
+Signed-off-by: Codex <codex@example.com>
+---
+ hw/vmapple/bdif.c | 34 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 34 insertions(+)
+
+diff --git a/hw/vmapple/bdif.c b/hw/vmapple/bdif.c
+index 0000000000..0000000000 100644
+--- a/hw/vmapple/bdif.c
++++ b/hw/vmapple/bdif.c
+@@ -43,6 +43,9 @@ struct VMAppleBdifState {
+     char *usb_restore_first_packet;
+     CharFrontend usb_restore_chr;
+     bool block_writes;
++    uint32_t root_queue_notify;
++    uint32_t aux_queue_notify;
++    uint32_t usb_queue_notify;
+ };
+ 
+ #define VMAPPLE_BDIF_SIZE   0x00200000
+@@ -346,6 +349,21 @@ static const char *bdif_reg_name(hwaddr offset)
+     }
+ }
+ 
++static uint32_t *bdif_queue_notify_for_devid(VMAppleBdifState *s,
++                                             uint64_t devid)
++{
++    switch (devid) {
++    case DEVID_ROOT:
++        return &s->root_queue_notify;
++    case DEVID_AUX:
++        return &s->aux_queue_notify;
++    case DEVID_USB:
++        return &s->usb_queue_notify;
++    default:
++        return NULL;
++    }
++}
++
+ static uint64_t bdif_guest_pc(void)
+ {
+     return current_cpu ? current_cpu->cc->get_pc(current_cpu) : 0;
+@@ -493,6 +511,13 @@ static uint64_t bdif_read(void *opaque, hwaddr offset, unsigned size)
+     case REG_UNK2:
+         ret = present ? 0x1 : 0;
+         break;
++    case REG_QUEUE_NOTIFY:
++        {
++            uint32_t *queue_notify = bdif_queue_notify_for_devid(s, devid);
++
++            ret = present && queue_notify ? *queue_notify : 0;
++        }
++        break;
+     case REG_UNK3:
+         ret = present ? 0x0 : -1;
+         break;
+@@ -714,6 +739,15 @@ static void bdif_write(void *opaque, hwaddr offset,
+             vblk_cmd(s, devid, blk, value, 0x0);
+         }
+         break;
++    case REG_QUEUE_NOTIFY:
++        {
++            uint32_t *queue_notify = bdif_queue_notify_for_devid(s, devid);
++
++            if (blk && queue_notify) {
++                *queue_notify = (uint32_t)value;
++            }
++        }
++        break;
+     case REG_QUEUE_SELECT:
+         s->usb_restore_selected_queue = devid == DEVID_USB ? value : 0;
+         break;
+-- 
+2.50.1

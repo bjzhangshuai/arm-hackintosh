@@ -1,0 +1,27 @@
+[machine]
+accel = "tcg"
+tcg_thread = "multi"
+cpu_profile = "apple-silicon-compat"
+memory_gib = 8
+vcpus = 4
+
+[gpu]
+backend = "vulkan"
+vendor = "nvidia"
+device_name = "NVIDIA GeForce RTX 4060"
+pci_bdf = "auto"
+device_uuid = "auto"
+hardware_required = true
+allow_software_fallback = false
+
+[guest]
+target_macos = "12"
+avpbooter = "/path/to/AVPBooter"
+aux = "/path/to/aux.img"
+disk = "/path/to/macos-arm64.img"
+
+[observability]
+cpu_profile = false
+gpu_trace = false
+unsupported_opcode_log = "build/logs/unsupported-opcodes.log"
+pvg_trace = "build/logs/pvg-trace.jsonl"

@@ -1,0 +1,60 @@
+From 8f90f1b1a2d3c4e5f60718293a4b5c6d7e8f9012 Mon Sep 17 00:00:00 2001
+From: MacVM Validation <validation@localhost>
+Date: Mon, 31 Aug 2026 19:00:00 +0800
+Subject: [PATCH] hw/vmapple: trace BDIF read context
+
+Include the requesting guest PC and the first eight bytes returned by a BDIF
+block read in the existing tracepoint.  The extra context is inert unless the
+tracepoint is enabled and makes early AVPBooter AuxiliaryStorage failures
+diagnosable without changing the guest-visible device behavior.
+---
+ hw/vmapple/bdif.c       | 10 ++++++++--
+ hw/vmapple/trace-events |  2 +-
+ 2 files changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/hw/vmapple/bdif.c b/hw/vmapple/bdif.c
+index 8b9208da03..dcf71ed81a 100644
+--- a/hw/vmapple/bdif.c
++++ b/hw/vmapple/bdif.c
+@@ -14,6 +14,7 @@
+ #include "qemu/log.h"
+ #include "qemu/module.h"
+ #include "trace.h"
++#include "hw/core/cpu.h"
+ #include "hw/vmapple/vmapple.h"
+ #include "hw/core/sysbus.h"
+ #include "hw/block/block.h"
+@@ -140,6 +141,8 @@ static void vblk_cmd(uint64_t devid, BlockBackend *blk, uint64_t gp_addr,
+     uint8_t ret = VBLK_RET_FAILED;
+     int r;
+     MemTxResult dma_result;
++    uint64_t guest_pc;
++    uint64_t header;
+ 
+     dma_result = dma_memory_read(&address_space_memory, gp_addr,
+                                  &req, sizeof(req), MEMTXATTRS_UNSPECIFIED);
+@@ -177,8 +180,11 @@ static void vblk_cmd(uint64_t devid, BlockBackend *blk, uint64_t gp_addr,
+     switch (req.data.flags) {
+     case VBLK_DATA_FLAGS_READ:
+         r = blk_pread(blk, off, req.data.len, buf, 0);
++        guest_pc = current_cpu ? current_cpu->cc->get_pc(current_cpu) : 0;
++        header = req.data.len >= sizeof(header) ? ldq_le_p(buf) : 0;
+         trace_bdif_vblk_read(devid == DEVID_AUX ? "aux" : "root",
+-                             req.data.addr, off, req.data.len, r);
++                             req.data.addr, off, req.data.len, r,
++                             guest_pc, header);
+         if (r < 0) {
+             goto out;
+         }
+diff --git a/hw/vmapple/trace-events b/hw/vmapple/trace-events
+index 39c98e20d1..a34a675a63 100644
+--- a/hw/vmapple/trace-events
++++ b/hw/vmapple/trace-events
+@@ -18,4 +18,4 @@ aes_2_write(uint64_t offset, uint64_t val) "offset=0x%"PRIx64" val=0x%"PRIx64
+ # bdif.c
+ bdif_read(uint64_t offset, uint32_t size, uint64_t value) "offset=0x%"PRIx64" size=0x%x value=0x%"PRIx64
+ bdif_write(uint64_t offset, uint32_t size, uint64_t value) "offset=0x%"PRIx64" size=0x%x value=0x%"PRIx64
+-bdif_vblk_read(const char *dev, uint64_t addr, uint64_t offset, uint32_t len, int r) "dev=%s addr=0x%"PRIx64" off=0x%"PRIx64" size=0x%x r=%d"
++bdif_vblk_read(const char *dev, uint64_t addr, uint64_t offset, uint32_t len, int r, uint64_t pc, uint64_t header) "dev=%s addr=0x%"PRIx64" off=0x%"PRIx64" size=0x%x r=%d pc=0x%"PRIx64" head=0x%016"PRIx64
+-- 
+2.51.0

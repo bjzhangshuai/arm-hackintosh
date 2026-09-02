@@ -1,0 +1,32 @@
+From 6f7dc5d8bc3da9b9d868ebfe41455df4fcb85fb1 Mon Sep 17 00:00:00 2001
+From: MacVM Project <macvm@localhost>
+Date: Wed, 2 Sep 2026 02:10:00 +0800
+Subject: [PATCH] display: track the Reims MMIO transform as a build input
+
+The generated Linux MMIO source depended only on Reims' pinned C shim. Meson
+used the transform script in the command but did not track it as an input, so a
+corrected transform left a stale C object and a misleadingly successful QEMU
+link. Make both the pinned shim and transform explicit custom-target inputs and
+address them positionally.
+---
+ hw/display/meson.build | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/hw/display/meson.build b/hw/display/meson.build
+index 2317dc6e6d..db12ef6f9e 100644
+--- a/hw/display/meson.build
++++ b/hw/display/meson.build
+@@ -75,9 +75,9 @@ if config_all_devices.has_key('CONFIG_MACVM_REIMS_VGPU')
+   reims_vgpu_prepare = macvm_repo_dir / 'tools' / 'prepare_reims_qemu_mmio.py'
+ 
+   macvm_reims_vgpu_mmio = custom_target('macvm-reims-vgpu-mmio-source',
+-    input: reims_vgpu_mmio_source,
++    input: [reims_vgpu_mmio_source, reims_vgpu_prepare],
+     output: 'macvm-reims-vgpu-mmio.c',
+-    command: [python, reims_vgpu_prepare, '@INPUT@', '@OUTPUT@'])
++    command: [python, '@INPUT1@', '@INPUT0@', '@OUTPUT@'])
+ 
+   cargo = find_program('cargo')
+   reims_vgpu_built = reims_vgpu_repo_dir / 'target' / 'release' / 'libreims_vgpu.a'
+-- 
+2.43.0

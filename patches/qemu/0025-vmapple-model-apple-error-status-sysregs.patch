@@ -1,0 +1,88 @@
+From 334f654f54c08545b004b8c58dc10fa6869803de Mon Sep 17 00:00:00 2001
+From: MacVM Project <macvm@localhost>
+Date: Tue, 1 Sep 2026 15:55:00 +0800
+Subject: [PATCH] hw/vmapple: model Apple error status system registers
+
+macOS 26 reads six Apple implementation-defined error status registers while
+bringing XNU online.  The max TCG CPU does not register these encodings, so
+the first read raises an Undefined Instruction panic in sleh.c before the
+restore environment can start.
+
+These registers report physical CPU, LLC, front-end, and MMU error state.
+QEMU does not model that hardware error state, so expose the exact six
+read-only encodings as zero, meaning no pending hardware error.  Register them
+only for the vmapple machine under TCG; HVF and other machines are unchanged.
+---
+ hw/vmapple/vmapple.c | 41 +++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 41 insertions(+)
+
+diff --git a/hw/vmapple/vmapple.c b/hw/vmapple/vmapple.c
+--- a/hw/vmapple/vmapple.c
++++ b/hw/vmapple/vmapple.c
+@@ -49,9 +49,11 @@
+ #include "standard-headers/linux/input.h"
+ #include "system/hvf.h"
+ #include "system/reset.h"
+ #include "system/runstate.h"
+ #include "system/system.h"
++#include "system/tcg.h"
++#include "target/arm/cpregs.h"
+ #include "target/arm/gtimer.h"
+ #include "target/arm/cpu.h"
+ 
+ struct VMAppleMachineState {
+@@ -417,6 +419,41 @@ static void create_pcie(VMAppleMachineState *vms)
+     }
+ }
+ 
++/*
++ * Apple Silicon exposes implementation-defined status registers for CPU,
++ * cache, front-end, and MMU hardware errors.  XNU samples these registers
++ * during early boot.  TCG has no corresponding physical error state, so a
++ * zero value accurately represents "no pending hardware error".  Keep this
++ * list exact: unknown implementation-defined registers must still trap.
++ */
++static const ARMCPRegInfo vmapple_tcg_error_status_regs[] = {
++    { .name = "VMAPPLE_MMU_ERR_STS", .state = ARM_CP_STATE_AA64,
++      .opc0 = 3, .opc1 = 6, .crn = 15, .crm = 0, .opc2 = 0,
++      .access = PL1_R, .type = ARM_CP_CONST, .resetvalue = 0 },
++    { .name = "VMAPPLE_LLC_ERR_STS", .state = ARM_CP_STATE_AA64,
++      .opc0 = 3, .opc1 = 3, .crn = 15, .crm = 8, .opc2 = 0,
++      .access = PL1_R, .type = ARM_CP_CONST, .resetvalue = 0 },
++    { .name = "VMAPPLE_LLC_ERR_ADR", .state = ARM_CP_STATE_AA64,
++      .opc0 = 3, .opc1 = 3, .crn = 15, .crm = 9, .opc2 = 0,
++      .access = PL1_R, .type = ARM_CP_CONST, .resetvalue = 0 },
++    { .name = "VMAPPLE_LLC_ERR_INF", .state = ARM_CP_STATE_AA64,
++      .opc0 = 3, .opc1 = 3, .crn = 15, .crm = 10, .opc2 = 0,
++      .access = PL1_R, .type = ARM_CP_CONST, .resetvalue = 0 },
++    { .name = "VMAPPLE_LSU_ERR_STS", .state = ARM_CP_STATE_AA64,
++      .opc0 = 3, .opc1 = 3, .crn = 15, .crm = 0, .opc2 = 0,
++      .access = PL1_R, .type = ARM_CP_CONST, .resetvalue = 0 },
++    { .name = "VMAPPLE_FED_ERR_STS", .state = ARM_CP_STATE_AA64,
++      .opc0 = 3, .opc1 = 4, .crn = 15, .crm = 0, .opc2 = 0,
++      .access = PL1_R, .type = ARM_CP_CONST, .resetvalue = 0 },
++};
++
++static void vmapple_register_tcg_error_status_regs(ARMCPU *cpu)
++{
++    if (tcg_enabled()) {
++        define_arm_cp_regs(cpu, vmapple_tcg_error_status_regs);
++    }
++}
++
+ static void vmapple_reset(void *opaque)
+ {
+     VMAppleMachineState *vms = opaque;
+@@ -461,6 +498,10 @@ static void mach_vmapple_init(MachineState *machine)
+         }
+ 
+         cpu = object_new(possible_cpus->cpus[n].type);
++
++        /* Must be registered before the CPU is realized. */
++        vmapple_register_tcg_error_status_regs(ARM_CPU(cpu));
++
+         object_property_set_int(cpu, "mp-affinity",
+                                 possible_cpus->cpus[n].arch_id, &error_fatal);
+ 
+-- 
+2.51.0

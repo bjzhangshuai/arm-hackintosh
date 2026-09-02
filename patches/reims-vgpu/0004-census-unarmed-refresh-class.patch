@@ -1,0 +1,69 @@
+From: MacVM validation <macvm@validation.invalid>
+Subject: [PATCH 4/4] reims: account for an unarmed refresh class
+
+Keep "display not online" distinct from "online but no refresh completion class
+armed" in the always-on VBL census used by the new guest-selected signal path.
+---
+ crates/reims-vgpu/src/runtime/drain/mod.rs   | 7 +++++--
+ crates/reims-vgpu/src/runtime/drain/tests.rs | 8 ++++++--
+ 2 files changed, 11 insertions(+), 4 deletions(-)
+
+diff --git a/crates/reims-vgpu/src/runtime/drain/mod.rs b/crates/reims-vgpu/src/runtime/drain/mod.rs
+--- a/crates/reims-vgpu/src/runtime/drain/mod.rs
++++ b/crates/reims-vgpu/src/runtime/drain/mod.rs
+@@ -3100,5 +3100,6 @@ pub(crate) const VBL_NOT_ONLINE: usize = 0;
+ pub(crate) const VBL_NOT_CLAIMED: usize = 1;
+ pub(crate) const VBL_DELIVERED: usize = 2;
++pub(crate) const VBL_NOT_ENABLED: usize = 3;
+ 
+ /// One report per this many deliveries — about 8 s at the grid rate.
+ const VBL_REPORT_EVERY: u64 = 1024;
+@@ -3107,6 +3108,6 @@ const VBL_REPORT_EVERY: u64 = 1024;
+ #[derive(Default)]
+ pub(crate) struct VblCensus {
+-    arms: [std::sync::atomic::AtomicU64; 3],
++    arms: [std::sync::atomic::AtomicU64; 4],
+     last_report_ms: std::sync::atomic::AtomicU64,
+     last_report_n: std::sync::atomic::AtomicU64,
+ }
+@@ -3137,9 +3138,10 @@ impl VblCensus {
+         };
+         Some(format!(
+-            "display_vbl delivered={n} not_claimed={} not_online={} window_hz={hz:.1} \
++            "display_vbl delivered={n} not_claimed={} not_online={} not_enabled={} window_hz={hz:.1} \
+              grid_hz={:.1}",
+             self.arms[VBL_NOT_CLAIMED].load(Relaxed),
+             self.arms[VBL_NOT_ONLINE].load(Relaxed),
++            self.arms[VBL_NOT_ENABLED].load(Relaxed),
+             1_000_000.0 / DISPLAY_VBL_MIN_INTERVAL_US as f64,
+         ))
+     }
+diff --git a/crates/reims-vgpu/src/runtime/drain/tests.rs b/crates/reims-vgpu/src/runtime/drain/tests.rs
+--- a/crates/reims-vgpu/src/runtime/drain/tests.rs
++++ b/crates/reims-vgpu/src/runtime/drain/tests.rs
+@@ -1812,10 +1812,13 @@ fn the_vbl_census_reports_window_rate_and_separates_the_silent_arms() {
+-    use crate::runtime::drain::{VblCensus, VBL_DELIVERED, VBL_NOT_CLAIMED, VBL_NOT_ONLINE};
++    use crate::runtime::drain::{
++        VblCensus, VBL_DELIVERED, VBL_NOT_CLAIMED, VBL_NOT_ENABLED, VBL_NOT_ONLINE,
++    };
+     let c = VblCensus::default();
+ 
+     // The silent arms never report, however many times they are taken.
+     for i in 0..5000u64 {
+         assert!(c.note(VBL_NOT_ONLINE, i).is_none());
+         assert!(c.note(VBL_NOT_CLAIMED, i).is_none());
++        assert!(c.note(VBL_NOT_ENABLED, i).is_none());
+     }
+ 
+     // 1024 deliveries at the 8 ms grid: one report, and the rate is the grid.
+@@ -1838,6 +1841,7 @@ fn the_vbl_census_reports_window_rate_and_separates_the_silent_arms() {
+     );
+     assert!(
+-        line.contains("not_online=5000") && line.contains("not_claimed=5000"),
++        line.contains("not_online=5000") && line.contains("not_claimed=5000")
++            && line.contains("not_enabled=5000"),
+         "the silent arms must stay separable and counted: {line}"
+     );
+ 
+-- 
+2.43.0

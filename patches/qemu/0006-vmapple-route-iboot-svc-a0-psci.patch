@@ -1,0 +1,161 @@
+From e0b6c3d7d04d9e3fc734da17cfeac53033d18ec1 Mon Sep 17 00:00:00 2001
+From: MacVM Project <macvm@localhost>
+Date: Tue, 1 Sep 2026 02:05:00 +0800
+Subject: [PATCH] hw/vmapple: route Apple iBoot SVC #0xa0 PSCI calls
+
+Apple's restore iBEC issues PSCI-style function IDs through SVC #0xa0
+while running on the vmapple TCG path.  QEMU's TCG PSCI dispatcher only
+recognizes HVC and SMC conduits, so those calls are delivered back to the
+guest EL1 vector and iBEC enters its panic path instead of receiving a
+PSCI result.
+
+Add an opt-in vmapple machine property, svc-a0-psci, that routes AArch64
+SVC #0xa0 calls whose x0 value is one of QEMU's implemented PSCI function
+IDs into the existing TCG PSCI handler.  Keep the default HVC conduit so
+generic vmapple boot behavior is unchanged, and filter by both immediate
+and function ID so unrelated Apple firmware SVC calls are not swallowed.
+---
+ hw/vmapple/vmapple.c       | 31 +++++++++++++++++++++++++++++--
+ target/arm/cpu.h           |  1 +
+ target/arm/tcg/psci.c      | 42 ++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 72 insertions(+), 2 deletions(-)
+
+diff --git a/hw/vmapple/vmapple.c b/hw/vmapple/vmapple.c
+index 81ebad14f5..d2a0293f21 100644
+--- a/hw/vmapple/vmapple.c
++++ b/hw/vmapple/vmapple.c
+@@ -66,6 +66,7 @@ struct VMAppleMachineState {
+     Notifier powerdown_notifier;
+     PCIBus *bus;
++    bool svc_a0_psci;
+     MemoryRegion fw_mr;
+     MemoryRegion ecam_alias;
+     uint64_t uuid;
+     uint32_t rnd;
+@@ -477,8 +478,10 @@ static void mach_vmapple_init(MachineState *machine)
+         if (object_property_find(cpu, "has_el2")) {
+             object_property_set_bool(cpu, "has_el2", false, &error_fatal);
+         }
+-        object_property_set_int(cpu, "psci-conduit", QEMU_PSCI_CONDUIT_HVC,
+-                                &error_fatal);
++        object_property_set_int(cpu, "psci-conduit",
++                                vms->svc_a0_psci ? QEMU_PSCI_CONDUIT_SVC_A0
++                                                  : QEMU_PSCI_CONDUIT_HVC,
++                                &error_fatal);
+ 
+         /* Secondary CPUs start in PSCI powered-down state */
+         if (n > 0) {
+@@ -593,6 +596,24 @@ static void vmapple_machine_class_init(ObjectClass *oc, const void *data)
+                      G_N_ELEMENTS(vmapple_compat_defaults));
+ }
+ 
++static bool vmapple_get_svc_a0_psci(Object *obj, Error **errp)
++{
++    VMAppleMachineState *vms = VMAPPLE_MACHINE(obj);
++
++    return vms->svc_a0_psci;
++}
++
++static void vmapple_set_svc_a0_psci(Object *obj, bool value, Error **errp)
++{
++    VMAppleMachineState *vms = VMAPPLE_MACHINE(obj);
++
++    /*
++     * Default false keeps the existing HVC PSCI path.  This option is for
++     * restore firmware that emits Apple iBoot's SVC #0xa0 PSCI conduit.
++     */
++    vms->svc_a0_psci = value;
++}
++
+ static void vmapple_instance_init(Object *obj)
+ {
+     VMAppleMachineState *vms = VMAPPLE_MACHINE(obj);
+@@ -602,6 +621,13 @@ static void vmapple_instance_init(Object *obj)
+ 
+     vms->irqmap = irqmap;
+ 
++    object_property_add_bool(obj, "svc-a0-psci",
++                             vmapple_get_svc_a0_psci,
++                             vmapple_set_svc_a0_psci);
++    object_property_set_description(
++        obj,
++        "svc-a0-psci",
++        "Route Apple iBoot SVC #0xa0 PSCI calls to QEMU PSCI; default off");
+     object_property_add_uint64_ptr(obj, "uuid", &vms->uuid,
+                                    OBJ_PROP_FLAG_READWRITE);
+     object_property_set_description(obj, "uuid", "Machine UUID (SDOM)");
+diff --git a/target/arm/cpu.h b/target/arm/cpu.h
+index b90533759a..c17f7ed68e 100644
+--- a/target/arm/cpu.h
++++ b/target/arm/cpu.h
+@@ -2624,6 +2624,7 @@ enum {
+     QEMU_PSCI_CONDUIT_DISABLED = 0,
+     QEMU_PSCI_CONDUIT_SMC = 1,
+     QEMU_PSCI_CONDUIT_HVC = 2,
++    QEMU_PSCI_CONDUIT_SVC_A0 = 3,
+ };
+ 
+ #ifndef CONFIG_USER_ONLY
+diff --git a/target/arm/tcg/psci.c b/target/arm/tcg/psci.c
+index 00fe93ffc1..ba90c0c7d5 100644
+--- a/target/arm/tcg/psci.c
++++ b/target/arm/tcg/psci.c
+@@ -24,7 +24,44 @@
+ #include "arm-powerctl.h"
+ #include "target/arm/multiprocessing.h"
+ #include "target/arm/trace.h"
++#include "syndrome.h"
+ 
++static bool arm_is_implemented_psci_function(uint64_t function_id)
++{
++    switch (function_id) {
++    case QEMU_PSCI_0_2_FN_PSCI_VERSION:
++    case QEMU_PSCI_0_2_FN_MIGRATE_INFO_TYPE:
++    case QEMU_PSCI_0_2_FN_AFFINITY_INFO:
++    case QEMU_PSCI_0_2_FN64_AFFINITY_INFO:
++    case QEMU_PSCI_0_2_FN_SYSTEM_RESET:
++    case QEMU_PSCI_0_2_FN_SYSTEM_OFF:
++    case QEMU_PSCI_0_1_FN_CPU_ON:
++    case QEMU_PSCI_0_2_FN_CPU_ON:
++    case QEMU_PSCI_0_2_FN64_CPU_ON:
++    case QEMU_PSCI_0_1_FN_CPU_OFF:
++    case QEMU_PSCI_0_2_FN_CPU_OFF:
++    case QEMU_PSCI_0_1_FN_CPU_SUSPEND:
++    case QEMU_PSCI_0_2_FN_CPU_SUSPEND:
++    case QEMU_PSCI_0_2_FN64_CPU_SUSPEND:
++    case QEMU_PSCI_1_0_FN_PSCI_FEATURES:
++    case QEMU_PSCI_0_1_FN_MIGRATE:
++    case QEMU_PSCI_0_2_FN_MIGRATE:
++        return true;
++    default:
++        return false;
++    }
++}
++
++static bool arm_is_iboot_svc_a0_psci_call(ARMCPU *cpu)
++{
++    CPUARMState *env = &cpu->env;
++
++    return is_a64(env) &&
++           syn_get_ec(env->exception.syndrome) == EC_AA64_SVC &&
++           FIELD_EX32(env->exception.syndrome, ISS_IMM16, IMM16) == 0xa0 &&
++           arm_is_implemented_psci_function(env->xregs[0]);
++}
++
+ bool arm_is_psci_call(ARMCPU *cpu, int excp_type)
+ {
+     /*
+@@ -47,6 +78,11 @@ bool arm_is_psci_call(ARMCPU *cpu, int excp_type)
+             return false;
+         }
+         break;
++    case EXCP_SWI:
++        if (cpu->psci_conduit == QEMU_PSCI_CONDUIT_SVC_A0) {
++            return arm_is_iboot_svc_a0_psci_call(cpu);
++        }
++        return false;
+     default:
+         return false;
+     }
+-- 
+2.51.0

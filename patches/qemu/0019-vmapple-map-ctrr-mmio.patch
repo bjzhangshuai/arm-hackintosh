@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@example.com>
+Date: Tue, 1 Sep 2026 16:15:00 +0800
+Subject: [PATCH] hw/vmapple: map Linux TCG CTRR MMIO sentinel
+
+After the RestoreKernelCache bootx path gets past the 0x30240040 probe, the
+restore iBEC reaches the CTRR detection path.  The live fault trace shows it
+building 0x30260000, loading a 32-bit register from that address, and comparing
+the value against the 0x63747272 FourCC ("ctrr").  The current Linux TCG
+vmapple map does not provide that MMIO window, so the read raises a data abort
+before iBEC can take the unsupported-CTRR branch.
+
+Map 0x30260000..0x3026ffff as an unimplemented-device sentinel on the
+non-MAC_PVG_MMIO path.  Returning zero preserves the observable "not CTRR"
+behavior for now while avoiding an unmapped-device panic.  A real CTRR model can
+replace this sentinel once the full Apple boot environment needs it.
+
+Signed-off-by: Codex <codex@example.com>
+---
+ hw/vmapple/vmapple.c | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/hw/vmapple/vmapple.c b/hw/vmapple/vmapple.c
+index af8cd5f..7c620b2 100644
+--- a/hw/vmapple/vmapple.c
++++ b/hw/vmapple/vmapple.c
+@@ -101,6 +101,7 @@ enum {
+     VMAPPLE_AES_1,
+     VMAPPLE_AES_2,
+     VMAPPLE_BOOT_PREP_MMIO,
++    VMAPPLE_CTRR_MMIO,
+     VMAPPLE_BDOOR,
+     VMAPPLE_MEMMAP_LAST,
+ };
+@@ -123,6 +124,7 @@ static const MemMapEntry memmap[] = {
+     [VMAPPLE_AES_1] =              { 0x30220000, 0x00004000 },
+     [VMAPPLE_AES_2] =              { 0x30230000, 0x00004000 },
+     [VMAPPLE_BOOT_PREP_MMIO] =     { 0x30240000, 0x00010000 },
++    [VMAPPLE_CTRR_MMIO] =          { 0x30260000, 0x00010000 },
+     [VMAPPLE_PCIE_ECAM] =          { 0x40000000, 0x10000000 },
+     [VMAPPLE_PCIE_MMIO] =          { 0x50000000, 0x1fff0000 },
+ 
+@@ -286,6 +288,22 @@ static void create_boot_prep_mmio(VMAppleMachineState *vms)
+ #endif
+ }
+ 
++static void create_ctrr_mmio(VMAppleMachineState *vms)
++{
++#ifndef CONFIG_MAC_PVG_MMIO
++    /*
++     * macOS restore iBEC probes CTRR support after bootx by reading
++     * 0x30260000 and comparing it with the 0x63747272 "ctrr" FourCC.  The
++     * Linux TCG path has no CTRR backend yet, so expose a sentinel that
++     * returns zero and lets iBEC follow the unsupported-CTRR path instead of
++     * taking a data abort on an unmapped MMIO read.
++     */
++    create_unimplemented_device("vmapple-ctrr-mmio",
++                                vms->memmap[VMAPPLE_CTRR_MMIO].base,
++                                vms->memmap[VMAPPLE_CTRR_MMIO].size);
++#endif
++}
++
+ static void create_aes(VMAppleMachineState *vms, MemoryRegion *mem)
+ {
+     int irq = vms->irqmap[VMAPPLE_AES_1];
+@@ -572,6 +593,7 @@ static void mach_vmapple_init(MachineState *machine)
+     create_aes(vms, sysmem);
+     create_gfx(vms, sysmem);
+     create_boot_prep_mmio(vms);
++    create_ctrr_mmio(vms);
+     create_uart(vms, VMAPPLE_UART, sysmem, serial_hd(0));
+     create_rtc(vms);
+     create_pcie(vms);
+-- 
+2.50.1

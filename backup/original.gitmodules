@@ -1,0 +1,12 @@
+[submodule "third_party/qemu"]
+	path = third_party/qemu
+	url = https://gitlab.com/qemu-project/qemu.git
+[submodule "third_party/reims-vgpu"]
+	path = third_party/reims-vgpu
+	url = https://github.com/steelbrain/reims-vgpu.git
+[submodule "third_party/metal2vulkan"]
+	path = third_party/metal2vulkan
+	url = https://github.com/steelbrain/metal2vulkan.git
+[submodule "third_party/libapplegfx-vulkan"]
+	path = third_party/libapplegfx-vulkan
+	url = https://github.com/MattJackson/libapplegfx-vulkan.git

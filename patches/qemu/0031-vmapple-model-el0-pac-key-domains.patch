@@ -1,0 +1,457 @@
+From 64778ac6d1a24c31af86fd0670092402a565749f Mon Sep 17 00:00:00 2001
+From: MacVM Project <macvm@localhost>
+Date: Tue, 1 Sep 2026 23:52:00 +0800
+Subject: [PATCH] target/arm: model vmapple EL0 PAC key domains
+
+Boot35 reaches macOS 26.6 launchd after loading both Apple trust caches, but
+launchd dies on instruction 0xdac11a30 (AUTDA x16, x17) with
+EXC_ARM_PAC_FAIL.  The preceding PAC HVC shim acknowledges
+VMAPPLE_PAC_SET_EL0_DIVERSIFIER and
+VMAPPLE_PAC_SET_EL0_DIVERSIFIER_AT_EL1 without changing any key state, and
+QEMU's generic PAuth helpers use one CPUARMState key bank at every exception
+level.  XNU, however, uses those calls to keep process-specific EL0 A/B keys
+separate from the kernel keys and to select the EL0 A key temporarily while
+the kernel signs or authenticates a userspace pointer.
+
+Add explicitly vmapple-scoped persistent EL0 and temporary EL1-user PAuth
+banks.  XNU documents that SET_EL0_DIVERSIFIER affects both A and B keys, so
+the effective EL0 bank combines the current A/B seed with that diversifier.
+SET_EL0_DIVERSIFIER_AT_EL1 derives a separate temporary bank and never mutates
+the persistent EL0 state.  SET_B_KEYS updates the common B seed used by both
+EL1 and the diversified EL0 bank.  The regular architectural bank remains the
+kernel EL1 bank, and non-vmapple guests retain the existing QEMU behavior.
+
+Boot36 showed why the temporary bank is necessary: reusing the persistent EL0
+bank for kernel-side shared-cache signing left launchd with the last pager's
+temporary key and reproduced the same AUTDA failure.  Add a tracepoint only on
+real vmapple authentication failure so future evidence includes the pointer,
+modifier, selected key, EL and guest PC without bypassing authentication.
+
+Boot37 then proved that a zero default EL0 diversifier prevents XNU from ever
+signing the dyld shared-cache pointers: vm_dyld_pager treats dyld_a_key == 0 as
+JOP disabled, while launchd still executes AUTDA.  Return a deterministic,
+non-zero default JOP diversifier so the pager enters pmap_sign_user_ptr and the
+temporary EL1-user bank signs with the same effective key used later at EL0.
+
+This models key selection; it does not bypass PAC instructions or turn failed
+authentication into success.
+---
+ target/arm/cpu.h              |  22 +++++++
+ target/arm/tcg/pauth_helper.c |  86 ++++++++++++++++++++++----
+ target/arm/tcg/psci.c         | 108 ++++++++++++++++++++++++++-------
+ target/arm/trace-events       |   1 +
+ 4 files changed, 184 insertions(+), 33 deletions(-)
+
+diff --git a/target/arm/cpu.h b/target/arm/cpu.h
+index 45f7a24e90..41647c4674 100644
+--- a/target/arm/cpu.h
++++ b/target/arm/cpu.h
+@@ -720,6 +720,28 @@ typedef struct CPUArchState {
+         ARMPACKey apga;
+     } keys;
+ 
++    /*
++     * Apple's vmapple PAC HVC ABI provides an EL0 key domain distinct from
++     * the architectural key bank used by EL1.  This state is consulted only
++     * after VMAPPLE_PAC_SET_INITIAL_STATE enables the vmapple model.
++     */
++    struct {
++        bool active;
++        bool use_el0_keys_at_el1;
++        uint64_t a_seed;
++        uint64_t b_seed;
++        uint64_t el0_diversifier;
++        uint64_t el1_user_diversifier;
++        ARMPACKey el0_apia;
++        ARMPACKey el0_apib;
++        ARMPACKey el0_apda;
++        ARMPACKey el0_apdb;
++        ARMPACKey el1_user_apia;
++        ARMPACKey el1_user_apib;
++        ARMPACKey el1_user_apda;
++        ARMPACKey el1_user_apdb;
++    } vmapple_pac;
++
+     uint64_t scxtnum_el[4];
+ 
+     struct {
+diff --git a/target/arm/tcg/pauth_helper.c b/target/arm/tcg/pauth_helper.c
+index b6a7a2a14f..c16bcb5ba8 100644
+--- a/target/arm/tcg/pauth_helper.c
++++ b/target/arm/tcg/pauth_helper.c
+@@ -25,6 +25,7 @@
+ #include "helper-a64.h"
+ #include "tcg/tcg-gvec-desc.h"
+ #include "qemu/xxhash.h"
++#include "target/arm/trace.h"
+ 
+ 
+ static uint64_t pac_cell_shuffle(uint64_t i)
+@@ -445,7 +446,12 @@ static uint64_t pauth_auth(CPUARMState *env, uint64_t ptr, uint64_t modifier,
+         uint64_t result = ptr ^ (pac & cmp_mask);
+ 
+         if (pauth_feature >= fault_feature
+             && ((result ^ sextract64(result, 55, 1)) & cmp_mask)) {
++            if (env->vmapple_pac.active) {
++                trace_vmapple_pauth_failure(
++                    ptr, modifier, orig_ptr, pac, key->lo, key->hi,
++                    data, keynumber, arm_current_el(env), env->pc);
++            }
+             pauth_fail_exception(env, data, keynumber, ra);
+         }
+         return result;
+@@ -503,44 +509,82 @@ static bool pauth_key_enabled(CPUARMState *env, int el, uint32_t bit)
+     return (arm_sctlr(env, el) & bit) != 0;
+ }
+ 
++static ARMPACKey *pauth_vmapple_key(CPUARMState *env, int el,
++                                    ARMPACKey *architectural_key,
++                                    ARMPACKey *el0_key,
++                                    ARMPACKey *el1_user_key)
++{
++    if (!env->vmapple_pac.active) {
++        return architectural_key;
++    }
++    if (el == 0) {
++        return el0_key;
++    }
++    if (el == 1 && env->vmapple_pac.use_el0_keys_at_el1) {
++        return el1_user_key;
++    }
++
++    return architectural_key;
++}
++
+ uint64_t HELPER(pacia)(CPUARMState *env, uint64_t x, uint64_t y)
+ {
+     int el = arm_current_el(env);
++    ARMPACKey *key;
++
+     if (!pauth_key_enabled(env, el, SCTLR_EnIA)) {
+         return x;
+     }
+     pauth_check_trap(env, el, GETPC());
+-    return pauth_addpac(env, x, y, &env->keys.apia, false);
++    key = pauth_vmapple_key(env, el, &env->keys.apia,
++                            &env->vmapple_pac.el0_apia,
++                            &env->vmapple_pac.el1_user_apia);
++    return pauth_addpac(env, x, y, key, false);
+ }
+ 
+ uint64_t HELPER(pacib)(CPUARMState *env, uint64_t x, uint64_t y)
+ {
+     int el = arm_current_el(env);
++    ARMPACKey *key;
++
+     if (!pauth_key_enabled(env, el, SCTLR_EnIB)) {
+         return x;
+     }
+     pauth_check_trap(env, el, GETPC());
+-    return pauth_addpac(env, x, y, &env->keys.apib, false);
++    key = pauth_vmapple_key(env, el, &env->keys.apib,
++                            &env->vmapple_pac.el0_apib,
++                            &env->vmapple_pac.el1_user_apib);
++    return pauth_addpac(env, x, y, key, false);
+ }
+ 
+ uint64_t HELPER(pacda)(CPUARMState *env, uint64_t x, uint64_t y)
+ {
+     int el = arm_current_el(env);
++    ARMPACKey *key;
++
+     if (!pauth_key_enabled(env, el, SCTLR_EnDA)) {
+         return x;
+     }
+     pauth_check_trap(env, el, GETPC());
+-    return pauth_addpac(env, x, y, &env->keys.apda, true);
++    key = pauth_vmapple_key(env, el, &env->keys.apda,
++                            &env->vmapple_pac.el0_apda,
++                            &env->vmapple_pac.el1_user_apda);
++    return pauth_addpac(env, x, y, key, true);
+ }
+ 
+ uint64_t HELPER(pacdb)(CPUARMState *env, uint64_t x, uint64_t y)
+ {
+     int el = arm_current_el(env);
++    ARMPACKey *key;
++
+     if (!pauth_key_enabled(env, el, SCTLR_EnDB)) {
+         return x;
+     }
+     pauth_check_trap(env, el, GETPC());
+-    return pauth_addpac(env, x, y, &env->keys.apdb, true);
++    key = pauth_vmapple_key(env, el, &env->keys.apdb,
++                            &env->vmapple_pac.el0_apdb,
++                            &env->vmapple_pac.el1_user_apdb);
++    return pauth_addpac(env, x, y, key, true);
+ }
+ 
+ uint64_t HELPER(pacga)(CPUARMState *env, uint64_t x, uint64_t y)
+@@ -556,11 +600,16 @@ static uint64_t pauth_autia(CPUARMState *env, uint64_t x, uint64_t y,
+                             uintptr_t ra, bool is_combined)
+ {
+     int el = arm_current_el(env);
++    ARMPACKey *key;
++
+     if (!pauth_key_enabled(env, el, SCTLR_EnIA)) {
+         return x;
+     }
+     pauth_check_trap(env, el, ra);
+-    return pauth_auth(env, x, y, &env->keys.apia, false, 0, ra, is_combined);
++    key = pauth_vmapple_key(env, el, &env->keys.apia,
++                            &env->vmapple_pac.el0_apia,
++                            &env->vmapple_pac.el1_user_apia);
++    return pauth_auth(env, x, y, key, false, 0, ra, is_combined);
+ }
+ 
+ uint64_t HELPER(autia)(CPUARMState *env, uint64_t x, uint64_t y)
+@@ -577,11 +626,16 @@ static uint64_t pauth_autib(CPUARMState *env, uint64_t x, uint64_t y,
+                             uintptr_t ra, bool is_combined)
+ {
+     int el = arm_current_el(env);
++    ARMPACKey *key;
++
+     if (!pauth_key_enabled(env, el, SCTLR_EnIB)) {
+         return x;
+     }
+     pauth_check_trap(env, el, ra);
+-    return pauth_auth(env, x, y, &env->keys.apib, false, 1, ra, is_combined);
++    key = pauth_vmapple_key(env, el, &env->keys.apib,
++                            &env->vmapple_pac.el0_apib,
++                            &env->vmapple_pac.el1_user_apib);
++    return pauth_auth(env, x, y, key, false, 1, ra, is_combined);
+ }
+ 
+ uint64_t HELPER(autib)(CPUARMState *env, uint64_t x, uint64_t y)
+@@ -598,11 +652,16 @@ static uint64_t pauth_autda(CPUARMState *env, uint64_t x, uint64_t y,
+                             uintptr_t ra, bool is_combined)
+ {
+     int el = arm_current_el(env);
++    ARMPACKey *key;
++
+     if (!pauth_key_enabled(env, el, SCTLR_EnDA)) {
+         return x;
+     }
+     pauth_check_trap(env, el, ra);
+-    return pauth_auth(env, x, y, &env->keys.apda, true, 0, ra, is_combined);
++    key = pauth_vmapple_key(env, el, &env->keys.apda,
++                            &env->vmapple_pac.el0_apda,
++                            &env->vmapple_pac.el1_user_apda);
++    return pauth_auth(env, x, y, key, true, 0, ra, is_combined);
+ }
+ 
+ uint64_t HELPER(autda)(CPUARMState *env, uint64_t x, uint64_t y)
+@@ -619,11 +678,16 @@ static uint64_t pauth_autdb(CPUARMState *env, uint64_t x, uint64_t y,
+                             uintptr_t ra, bool is_combined)
+ {
+     int el = arm_current_el(env);
++    ARMPACKey *key;
++
+     if (!pauth_key_enabled(env, el, SCTLR_EnDB)) {
+         return x;
+     }
+     pauth_check_trap(env, el, ra);
+-    return pauth_auth(env, x, y, &env->keys.apdb, true, 1, ra, is_combined);
++    key = pauth_vmapple_key(env, el, &env->keys.apdb,
++                            &env->vmapple_pac.el0_apdb,
++                            &env->vmapple_pac.el1_user_apdb);
++    return pauth_auth(env, x, y, key, true, 1, ra, is_combined);
+ }
+ 
+ uint64_t HELPER(autdb)(CPUARMState *env, uint64_t x, uint64_t y)
+diff --git a/target/arm/tcg/psci.c b/target/arm/tcg/psci.c
+index a43677e8ad..79f82df4d6 100644
+--- a/target/arm/tcg/psci.c
++++ b/target/arm/tcg/psci.c
+@@ -42,7 +42,7 @@
+ 
+ #define QEMU_APPLE_PAC_DEFAULT_A_KEY 0x564d4150504c4541ULL
+ #define QEMU_APPLE_PAC_DEFAULT_B_KEY 0x564d4150504c4542ULL
+-#define QEMU_APPLE_PAC_DEFAULT_EL0_DIVERSIFIER 0x0000000000000000ULL
++#define QEMU_APPLE_PAC_DEFAULT_EL0_DIVERSIFIER 0x564d4150504c454aULL
+ #define QEMU_APPLE_PAC_DEFAULT_G_KEY 0x564d4150504c4547ULL
+ 
+ #define QEMU_APPLE_PAC_DOMAIN_APIA 0x415049414b455930ULL
+@@ -89,33 +89,113 @@ static ARMPACKey arm_vmapple_pac_derive_key(uint64_t seed, uint64_t domain)
+     return key;
+ }
+ 
+-static void arm_vmapple_pac_program_a_keys(CPUARMState *env, uint64_t seed)
+-{
+-    env->keys.apia = arm_vmapple_pac_derive_key(seed,
+-                                                QEMU_APPLE_PAC_DOMAIN_APIA);
+-    env->keys.apda = arm_vmapple_pac_derive_key(seed,
+-                                                QEMU_APPLE_PAC_DOMAIN_APDA);
+-}
+-
+-static void arm_vmapple_pac_program_b_keys(CPUARMState *env, uint64_t seed)
+-{
+-    env->keys.apib = arm_vmapple_pac_derive_key(seed,
+-                                                QEMU_APPLE_PAC_DOMAIN_APIB);
+-    env->keys.apdb = arm_vmapple_pac_derive_key(seed,
+-                                                QEMU_APPLE_PAC_DOMAIN_APDB);
+-}
+-
++static uint64_t arm_vmapple_pac_effective_seed(uint64_t base_seed,
++                                                uint64_t diversifier)
++{
++    return arm_vmapple_pac_mix64(base_seed ^ diversifier);
++}
++
++static void arm_vmapple_pac_program_a_pair(ARMPACKey *apia,
++                                            ARMPACKey *apda,
++                                            uint64_t base_seed,
++                                            uint64_t diversifier)
++{
++    uint64_t seed = arm_vmapple_pac_effective_seed(base_seed, diversifier);
++
++    *apia = arm_vmapple_pac_derive_key(seed, QEMU_APPLE_PAC_DOMAIN_APIA);
++    *apda = arm_vmapple_pac_derive_key(seed, QEMU_APPLE_PAC_DOMAIN_APDA);
++}
++
++static void arm_vmapple_pac_program_b_pair(ARMPACKey *apib,
++                                            ARMPACKey *apdb,
++                                            uint64_t base_seed,
++                                            uint64_t diversifier)
++{
++    uint64_t seed = arm_vmapple_pac_effective_seed(base_seed, diversifier);
++
++    *apib = arm_vmapple_pac_derive_key(seed, QEMU_APPLE_PAC_DOMAIN_APIB);
++    *apdb = arm_vmapple_pac_derive_key(seed, QEMU_APPLE_PAC_DOMAIN_APDB);
++}
++
++static void arm_vmapple_pac_program_a_keys(CPUARMState *env, uint64_t seed)
++{
++    env->vmapple_pac.a_seed = seed;
++    env->keys.apia = arm_vmapple_pac_derive_key(
++        seed, QEMU_APPLE_PAC_DOMAIN_APIA);
++    env->keys.apda = arm_vmapple_pac_derive_key(
++        seed, QEMU_APPLE_PAC_DOMAIN_APDA);
++    arm_vmapple_pac_program_a_pair(
++        &env->vmapple_pac.el0_apia, &env->vmapple_pac.el0_apda,
++        seed, env->vmapple_pac.el0_diversifier);
++    arm_vmapple_pac_program_a_pair(
++        &env->vmapple_pac.el1_user_apia,
++        &env->vmapple_pac.el1_user_apda,
++        seed, env->vmapple_pac.el1_user_diversifier);
++}
++
++static void arm_vmapple_pac_program_b_keys(CPUARMState *env, uint64_t seed)
++{
++    env->vmapple_pac.b_seed = seed;
++    env->keys.apib = arm_vmapple_pac_derive_key(
++        seed, QEMU_APPLE_PAC_DOMAIN_APIB);
++    env->keys.apdb = arm_vmapple_pac_derive_key(
++        seed, QEMU_APPLE_PAC_DOMAIN_APDB);
++    arm_vmapple_pac_program_b_pair(
++        &env->vmapple_pac.el0_apib, &env->vmapple_pac.el0_apdb,
++        seed, env->vmapple_pac.el0_diversifier);
++    arm_vmapple_pac_program_b_pair(
++        &env->vmapple_pac.el1_user_apib,
++        &env->vmapple_pac.el1_user_apdb,
++        seed, env->vmapple_pac.el1_user_diversifier);
++}
++
++static void arm_vmapple_pac_program_el0_diversifier(CPUARMState *env,
++                                                     uint64_t diversifier)
++{
++    env->vmapple_pac.el0_diversifier = diversifier;
++    arm_vmapple_pac_program_a_pair(
++        &env->vmapple_pac.el0_apia, &env->vmapple_pac.el0_apda,
++        env->vmapple_pac.a_seed, diversifier);
++    arm_vmapple_pac_program_b_pair(
++        &env->vmapple_pac.el0_apib, &env->vmapple_pac.el0_apdb,
++        env->vmapple_pac.b_seed, diversifier);
++}
++
++static void arm_vmapple_pac_program_el1_user_diversifier(
++    CPUARMState *env, uint64_t diversifier)
++{
++    env->vmapple_pac.el1_user_diversifier = diversifier;
++    arm_vmapple_pac_program_a_pair(
++        &env->vmapple_pac.el1_user_apia,
++        &env->vmapple_pac.el1_user_apda,
++        env->vmapple_pac.a_seed, diversifier);
++    arm_vmapple_pac_program_b_pair(
++        &env->vmapple_pac.el1_user_apib,
++        &env->vmapple_pac.el1_user_apdb,
++        env->vmapple_pac.b_seed, diversifier);
++}
++
+ static void arm_vmapple_pac_program_g_key(CPUARMState *env, uint64_t seed)
+ {
+     env->keys.apga = arm_vmapple_pac_derive_key(seed,
+                                                 QEMU_APPLE_PAC_DOMAIN_APGA);
+ }
+ 
+ static void arm_vmapple_pac_set_initial_state(CPUARMState *env)
+ {
+-    arm_vmapple_pac_program_a_keys(env, QEMU_APPLE_PAC_DEFAULT_A_KEY);
+-    arm_vmapple_pac_program_b_keys(env, QEMU_APPLE_PAC_DEFAULT_B_KEY);
++    env->vmapple_pac.el0_diversifier =
++        QEMU_APPLE_PAC_DEFAULT_EL0_DIVERSIFIER;
++    env->vmapple_pac.el1_user_diversifier =
++        QEMU_APPLE_PAC_DEFAULT_EL0_DIVERSIFIER;
++    arm_vmapple_pac_program_a_keys(env, QEMU_APPLE_PAC_DEFAULT_A_KEY);
++    arm_vmapple_pac_program_b_keys(env, QEMU_APPLE_PAC_DEFAULT_B_KEY);
++    arm_vmapple_pac_program_el0_diversifier(
++        env, QEMU_APPLE_PAC_DEFAULT_EL0_DIVERSIFIER);
++    arm_vmapple_pac_program_el1_user_diversifier(
++        env, QEMU_APPLE_PAC_DEFAULT_EL0_DIVERSIFIER);
+     arm_vmapple_pac_program_g_key(env, QEMU_APPLE_PAC_DEFAULT_G_KEY);
++    env->vmapple_pac.use_el0_keys_at_el1 = false;
++    env->vmapple_pac.active = true;
+ }
+ 
+ static bool arm_handle_vmapple_pac_hvc_call(CPUARMState *env,
+@@ -132,25 +212,26 @@ static bool arm_handle_vmapple_pac_hvc_call(CPUARMState *env,
+         env->xregs[4] = QEMU_APPLE_PAC_DEFAULT_G_KEY;
+         break;
+     case QEMU_APPLE_PAC_SET_A_KEYS:
+-        arm_vmapple_pac_program_a_keys(env, env->xregs[1]);
++        arm_vmapple_pac_program_a_keys(env, env->xregs[1]);
+         break;
+     case QEMU_APPLE_PAC_SET_B_KEYS:
+-        arm_vmapple_pac_program_b_keys(env, env->xregs[1]);
++        arm_vmapple_pac_program_b_keys(env, env->xregs[1]);
+         break;
+     case QEMU_APPLE_PAC_SET_EL0_DIVERSIFIER:
+-        /*
+-         * The EL0 diversifier is part of Apple's vmapple hypervisor contract.
+-         * QEMU's generic TCG PAuth model has per-CPU PAC key registers but no
+-         * vmapple EL0/EL1 diversifier transition hook yet, so acknowledge the
+-         * call without changing EL1 keys.  If boot later reaches a userland PAC
+-         * failure, this is the next bounded model to extend.
+-         */
++        arm_vmapple_pac_program_el0_diversifier(env, env->xregs[1]);
+         break;
+     case QEMU_APPLE_PAC_SET_EL0_DIVERSIFIER_AT_EL1:
+-        /*
+-         * See the EL0 diversifier note above.  x1 selects temporary enable or
+-         * disable at EL1 and x2 supplies the diversifier seed.
+-         */
++        if (env->xregs[1] > 1) {
++            env->xregs[0] = QEMU_PSCI_RET_INVALID_PARAMS;
++            return true;
++        }
++        if (env->xregs[1] != 0) {
++            arm_vmapple_pac_program_el1_user_diversifier(
++                env, env->xregs[2]);
++            env->vmapple_pac.use_el0_keys_at_el1 = true;
++        } else {
++            env->vmapple_pac.use_el0_keys_at_el1 = false;
++        }
+         break;
+     case QEMU_APPLE_PAC_SET_G_KEY:
+         arm_vmapple_pac_program_g_key(env, env->xregs[1]);
+diff --git a/target/arm/trace-events b/target/arm/trace-events
+--- a/target/arm/trace-events
++++ b/target/arm/trace-events
+@@ -27,6 +27,7 @@ arm_powerctl_reset_cpu(uint64_t mp_aff) "cpu %" PRIu64
+ 
+ # tcg/psci.c and hvf/hvf.c
+ arm_psci_call(uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3, uint32_t cpuid, uint64_t pc) "PSCI Call x0=0x%016"PRIx64" x1=0x%016"PRIx64" x2=0x%016"PRIx64" x3=0x%016"PRIx64" cpuid=0x%x pc=0x%016"PRIx64
++vmapple_pauth_failure(uint64_t ptr, uint64_t modifier, uint64_t original, uint64_t pac, uint64_t key_lo, uint64_t key_hi, uint32_t data, uint32_t keynumber, uint32_t el, uint64_t pc) "ptr=0x%016"PRIx64" modifier=0x%016"PRIx64" original=0x%016"PRIx64" pac=0x%016"PRIx64" key_lo=0x%016"PRIx64" key_hi=0x%016"PRIx64" data=%u keynumber=%u el=%u pc=0x%016"PRIx64
+ 
+ # machine.c
+ cpu_post_load(uint32_t cpreg_vmstate_array_len, uint32_t cpreg_array_len) "cpreg_vmstate_array_len=%d cpreg_array_len=%d"

@@ -1,0 +1,215 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@example.com>
+Date: Tue, 1 Sep 2026 07:12:00 +0800
+Subject: [PATCH] hw/vmapple: add debug USB restore first-packet injection
+
+The USB BDIF restore path is not an aux/root sector block device.  iBEC posts a
+single host-output descriptor and waits until the host side has a restore event
+packet to copy into that buffer.
+
+Add an opt-in debug hook for the next bounded experiment: a
+vmapple-bdif.usb-restore-first-packet string property containing hex bytes for
+exactly one host-to-iBEC restore packet.  When unset, the default behavior from
+the previous patch is preserved: USB restore receives remain pending and iBEC
+waits for a real host stream.  When set, QEMU writes the decoded packet into the
+first pending USB restore buffer and reports the transfer as ready.
+
+This is deliberately a narrow diagnostic transport seed, not a completed restore
+client.  It lets us validate the iBEC packet type/endpoint state machine before
+adding a full chardev or socket backed restore service.
+
+Signed-off-by: Codex <codex@example.com>
+---
+ hw/vmapple/bdif.c       | 109 +++++++++++++++++++++++++++++++++++++++-
+ hw/vmapple/trace-events |   1 +
+ 2 files changed, 109 insertions(+), 1 deletion(-)
+
+diff --git a/hw/vmapple/bdif.c b/hw/vmapple/bdif.c
+index 0000000000..0000000000 100644
+--- a/hw/vmapple/bdif.c
++++ b/hw/vmapple/bdif.c
+@@ -13,6 +13,7 @@
+ #include "qemu/module.h"
+ #include "trace.h"
+ #include "hw/core/cpu.h"
++#include "hw/core/qdev-properties.h"
+ #include "hw/vmapple/vmapple.h"
+ #include "hw/core/sysbus.h"
+ #include "hw/block/block.h"
+@@ -29,7 +30,12 @@ struct VMAppleBdifState {
+     BlockBackend *root;
+     BlockBackend *usb;
+     bool usb_restore_pending;
++    bool usb_restore_first_packet_used;
++    uint64_t usb_restore_pending_addr;
++    uint32_t usb_restore_pending_len;
++    uint32_t usb_restore_pending_flags;
+     MemoryRegion mmio;
++    char *usb_restore_first_packet;
+ };
+ 
+ #define VMAPPLE_BDIF_SIZE   0x00200000
+@@ -76,6 +82,7 @@ typedef struct VblkReq {
+ #define VBLK_RET_FAILED   1
+ 
+ #define VBLK_USB_RESTORE_FLAGS 0x00020001
++#define VBLK_USB_RESTORE_MAX_PACKET (16 * MiB)
+ 
+ static bool bdif_is_usb_restore_transfer(uint64_t devid, const VblkReq *req)
+ {
+@@ -94,6 +101,114 @@ static bool bdif_is_usb_restore_transfer(uint64_t devid, const VblkReq *req)
+            req->retval.flags == 0;
+ }
+ 
++static int bdif_hex_value(char ch)
++{
++    if (ch >= '0' && ch <= '9') {
++        return ch - '0';
++    }
++    if (ch >= 'a' && ch <= 'f') {
++        return ch - 'a' + 10;
++    }
++    if (ch >= 'A' && ch <= 'F') {
++        return ch - 'A' + 10;
++    }
++    return -1;
++}
++
++static bool bdif_hex_separator(char ch)
++{
++    return ch == ':' || ch == ',' || ch == '-' || ch == '_' ||
++           ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r';
++}
++
++static int bdif_decode_hex_packet(const char *hex, uint8_t *buf,
++                                  size_t buf_len, size_t *packet_len)
++{
++    const char *p = hex;
++    size_t len = 0;
++
++    while (*p) {
++        int hi;
++        int lo;
++
++        while (bdif_hex_separator(*p)) {
++            p++;
++        }
++        if (!*p) {
++            break;
++        }
++
++        hi = bdif_hex_value(*p++);
++        if (hi < 0) {
++            return -1;
++        }
++
++        lo = bdif_hex_value(*p++);
++        if (lo < 0) {
++            return -1;
++        }
++
++        if (len == buf_len) {
++            return -1;
++        }
++        buf[len++] = (hi << 4) | lo;
++    }
++
++    if (!len) {
++        return -1;
++    }
++
++    *packet_len = len;
++    return 0;
++}
++
++static bool bdif_usb_restore_deliver_first_packet(VMAppleBdifState *s,
++                                                  const VblkReq *req,
++                                                  uint64_t gp_addr,
++                                                  uint64_t guest_pc)
++{
++    g_autofree uint8_t *packet = NULL;
++    size_t packet_len = 0;
++    uint64_t header = 0;
++    MemTxResult dma_result;
++
++    if (!s->usb_restore_first_packet || s->usb_restore_first_packet_used) {
++        return false;
++    }
++
++    s->usb_restore_first_packet_used = true;
++    if (req->sector.len > VBLK_USB_RESTORE_MAX_PACKET) {
++        trace_bdif_vblk_error("usb", "usb-restore-capacity", gp_addr,
++                              req->sector.len, VBLK_USB_RESTORE_MAX_PACKET,
++                              guest_pc);
++        return false;
++    }
++
++    packet = g_malloc0(req->sector.len);
++    if (bdif_decode_hex_packet(s->usb_restore_first_packet, packet,
++                               req->sector.len, &packet_len) < 0) {
++        trace_bdif_vblk_error("usb", "usb-restore-hex", gp_addr,
++                              req->sector.len, 0, guest_pc);
++        return false;
++    }
++
++    dma_result = dma_memory_write(&address_space_memory, req->sector.addr,
++                                  packet, packet_len,
++                                  MEMTXATTRS_UNSPECIFIED);
++    if (dma_result != MEMTX_OK) {
++        trace_bdif_vblk_error("usb", "usb-restore-dma", gp_addr,
++                              req->sector.addr, dma_result, guest_pc);
++        return false;
++    }
++
++    memcpy(&header, packet, MIN(packet_len, sizeof(header)));
++    s->usb_restore_pending = false;
++    trace_bdif_usb_restore_packet("inject-first", req->sector.addr,
++                                  req->sector.len, packet_len, header,
++                                  guest_pc);
++    return true;
++}
++
+ static BlockBackend *bdif_backend_for_devid(VMAppleBdifState *s,
+                                             uint64_t devid)
+ {
+@@ -264,9 +354,21 @@ static void vblk_cmd(VMAppleBdifState *s, uint64_t devid, BlockBackend *blk,
+ 
+     if (bdif_is_usb_restore_transfer(devid, &req)) {
+         s->usb_restore_pending = true;
++        s->usb_restore_pending_addr = req.sector.addr;
++        s->usb_restore_pending_len = req.sector.len;
++        s->usb_restore_pending_flags = req.sector.flags;
++
++        trace_bdif_usb_restore_packet("pending", req.sector.addr,
++                                      req.sector.len, 0, 0, guest_pc);
++        if (bdif_usb_restore_deliver_first_packet(s, &req, gp_addr,
++                                                  guest_pc)) {
++            return;
++        }
++
+         trace_bdif_vblk_error(bdif_devid_name(devid), "usb-restore-pending",
+                               gp_addr, req.sector.len, req.sector.flags,
+                               guest_pc);
++        s->usb_restore_pending = true;
+         return;
+     }
+ 
+@@ -403,6 +505,7 @@ static const Property bdif_properties[] = {
+     DEFINE_PROP_DRIVE("aux", VMAppleBdifState, aux),
+     DEFINE_PROP_DRIVE("root", VMAppleBdifState, root),
+     DEFINE_PROP_DRIVE("usb", VMAppleBdifState, usb),
++    DEFINE_PROP_STRING("usb-restore-first-packet", VMAppleBdifState, usb_restore_first_packet),
+ };
+ 
+ static void bdif_class_init(ObjectClass *klass, const void *data)
+diff --git a/hw/vmapple/trace-events b/hw/vmapple/trace-events
+index 0000000000..0000000000 100644
+--- a/hw/vmapple/trace-events
++++ b/hw/vmapple/trace-events
+@@ -25,3 +25,4 @@ bdif_vblk_cmd(const char *dev, uint64_t gp_addr, uint64_t pc) "dev=%s gp=0x%"PRI
+ bdif_vblk_desc(const char *dev, const char *desc, uint64_t addr, uint32_t len, uint32_t flags, uint64_t pc) "dev=%s %s={addr=0x%"PRIx64" len=0x%x flags=0x%x} pc=0x%"PRIx64
+ bdif_vblk_sector(const char *dev, uint32_t sector, uint64_t offset, uint32_t data_len, uint32_t data_flags, uint64_t pc) "dev=%s sector=0x%x off=0x%"PRIx64" data_len=0x%x data_flags=0x%x pc=0x%"PRIx64
+ bdif_vblk_error(const char *dev, const char *reason, uint64_t gp_addr, uint64_t detail0, uint64_t detail1, uint64_t pc) "dev=%s reason=%s gp=0x%"PRIx64" detail0=0x%"PRIx64" detail1=0x%"PRIx64" pc=0x%"PRIx64
++bdif_usb_restore_packet(const char *action, uint64_t addr, uint32_t capacity, uint32_t len, uint64_t header, uint64_t pc) "action=%s addr=0x%"PRIx64" capacity=0x%x len=0x%x header=0x%016"PRIx64" pc=0x%"PRIx64
+-- 
+2.50.1

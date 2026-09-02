@@ -1,0 +1,203 @@
+From 18b5d44cb2fd78e7c9f72f3f5df59abdc0a6ac8b Mon Sep 17 00:00:00 2001
+From: MacVM Project <macvm@localhost>
+Date: Tue, 1 Sep 2026 14:25:00 +0800
+Subject: [PATCH] target/arm: handle vmapple XNU PAC HVC family
+
+The restore path now reaches MMU-enabled XNU.  After the first low-address
+bootstrap HVC (0xc1000000), the high-address kernel immediately executes
+additional vmapple PAC calls:
+
+    mov x0, #0xc1000001
+    hvc #0
+    cbnz x0, .
+
+Apple's vmapple guest ABI defines 0xc1000000..0xc1000006 as HVC64 fast calls
+for initializing Apple PAuth state, retrieving default 64-bit key seeds,
+programming A/B/G PAC keys, and recording EL0 diversifier requests.  Upstream
+QEMU TCG has architectural ARMv8.3 PAuth support and per-CPU 128-bit PAC key
+register state, but it has no EL2 vmapple hypervisor to service these calls
+when the Linux-host restore path disables EL2.
+
+Extend the earlier bootstrap HVC shim into a bounded vmapple PAC HVC handler.
+The handler accepts only the documented PAC HVC function-id range and only for
+AArch64 HVC #0.  It derives deterministic 128-bit QEMU PAC keys from the
+guest-visible 64-bit seed values, returns the documented success code, and
+returns stable default seeds for APPLE_PAC_GET_DEFAULT_KEYS.  EL0 diversifier
+calls are acknowledged but do not yet re-key automatically on EL transitions;
+that limitation is intentionally explicit so later userland/launchd failures
+can be traced to a concrete missing model rather than hidden behind HVC UDEFs.
+---
+ target/arm/tcg/psci.c | 137 +++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 126 insertions(+), 11 deletions(-)
+
+diff --git a/target/arm/tcg/psci.c b/target/arm/tcg/psci.c
+index 681a98e655..19b8b2e8a2 100644
+--- a/target/arm/tcg/psci.c
++++ b/target/arm/tcg/psci.c
+@@ -26,11 +26,123 @@
+ #include "target/arm/trace.h"
+ #include "syndrome.h"
+ 
+-#define QEMU_APPLE_XNU_BOOT_HVC 0xc1000000ULL
++#define QEMU_APPLE_PAC_SET_INITIAL_STATE 0xc1000000ULL
++#define QEMU_APPLE_PAC_GET_DEFAULT_KEYS 0xc1000001ULL
++#define QEMU_APPLE_PAC_SET_A_KEYS 0xc1000002ULL
++#define QEMU_APPLE_PAC_SET_B_KEYS 0xc1000003ULL
++#define QEMU_APPLE_PAC_SET_EL0_DIVERSIFIER 0xc1000004ULL
++#define QEMU_APPLE_PAC_SET_EL0_DIVERSIFIER_AT_EL1 0xc1000005ULL
++#define QEMU_APPLE_PAC_SET_G_KEY 0xc1000006ULL
+ 
+-static bool arm_is_vmapple_xnu_boot_hvc_function(uint64_t function_id)
++#define QEMU_APPLE_PAC_DEFAULT_A_KEY 0x564d4150504c4541ULL
++#define QEMU_APPLE_PAC_DEFAULT_B_KEY 0x564d4150504c4542ULL
++#define QEMU_APPLE_PAC_DEFAULT_EL0_DIVERSIFIER 0x0000000000000000ULL
++#define QEMU_APPLE_PAC_DEFAULT_G_KEY 0x564d4150504c4547ULL
++
++#define QEMU_APPLE_PAC_DOMAIN_APIA 0x415049414b455930ULL
++#define QEMU_APPLE_PAC_DOMAIN_APDA 0x415044414b455930ULL
++#define QEMU_APPLE_PAC_DOMAIN_APIB 0x415049424b455930ULL
++#define QEMU_APPLE_PAC_DOMAIN_APDB 0x415044424b455930ULL
++#define QEMU_APPLE_PAC_DOMAIN_APGA 0x415047414b455930ULL
++
++static bool arm_is_vmapple_pac_hvc_function(uint64_t function_id)
++{
++    return function_id >= QEMU_APPLE_PAC_SET_INITIAL_STATE &&
++           function_id <= QEMU_APPLE_PAC_SET_G_KEY;
++}
++
++static uint64_t arm_vmapple_pac_mix64(uint64_t value)
++{
++    value ^= value >> 30;
++    value *= 0xbf58476d1ce4e5b9ULL;
++    value ^= value >> 27;
++    value *= 0x94d049bb133111ebULL;
++    value ^= value >> 31;
++    return value;
++}
++
++static ARMPACKey arm_vmapple_pac_derive_key(uint64_t seed, uint64_t domain)
++{
++    ARMPACKey key = {
++        .lo = arm_vmapple_pac_mix64(seed ^ domain),
++        .hi = arm_vmapple_pac_mix64(seed + domain + 0x9e3779b97f4a7c15ULL),
++    };
++
++    return key;
++}
++
++static void arm_vmapple_pac_program_a_keys(CPUARMState *env, uint64_t seed)
++{
++    env->keys.apia = arm_vmapple_pac_derive_key(seed,
++                                                QEMU_APPLE_PAC_DOMAIN_APIA);
++    env->keys.apda = arm_vmapple_pac_derive_key(seed,
++                                                QEMU_APPLE_PAC_DOMAIN_APDA);
++}
++
++static void arm_vmapple_pac_program_b_keys(CPUARMState *env, uint64_t seed)
++{
++    env->keys.apib = arm_vmapple_pac_derive_key(seed,
++                                                QEMU_APPLE_PAC_DOMAIN_APIB);
++    env->keys.apdb = arm_vmapple_pac_derive_key(seed,
++                                                QEMU_APPLE_PAC_DOMAIN_APDB);
++}
++
++static void arm_vmapple_pac_program_g_key(CPUARMState *env, uint64_t seed)
++{
++    env->keys.apga = arm_vmapple_pac_derive_key(seed,
++                                                QEMU_APPLE_PAC_DOMAIN_APGA);
++}
++
++static void arm_vmapple_pac_set_initial_state(CPUARMState *env)
+ {
+-    return function_id == QEMU_APPLE_XNU_BOOT_HVC;
++    arm_vmapple_pac_program_a_keys(env, QEMU_APPLE_PAC_DEFAULT_A_KEY);
++    arm_vmapple_pac_program_b_keys(env, QEMU_APPLE_PAC_DEFAULT_B_KEY);
++    arm_vmapple_pac_program_g_key(env, QEMU_APPLE_PAC_DEFAULT_G_KEY);
++}
++
++static bool arm_handle_vmapple_pac_hvc_call(CPUARMState *env,
++                                            uint64_t function_id)
++{
++    switch (function_id) {
++    case QEMU_APPLE_PAC_SET_INITIAL_STATE:
++        arm_vmapple_pac_set_initial_state(env);
++        break;
++    case QEMU_APPLE_PAC_GET_DEFAULT_KEYS:
++        env->xregs[1] = QEMU_APPLE_PAC_DEFAULT_A_KEY;
++        env->xregs[2] = QEMU_APPLE_PAC_DEFAULT_B_KEY;
++        env->xregs[3] = QEMU_APPLE_PAC_DEFAULT_EL0_DIVERSIFIER;
++        env->xregs[4] = QEMU_APPLE_PAC_DEFAULT_G_KEY;
++        break;
++    case QEMU_APPLE_PAC_SET_A_KEYS:
++        arm_vmapple_pac_program_a_keys(env, env->xregs[1]);
++        break;
++    case QEMU_APPLE_PAC_SET_B_KEYS:
++        arm_vmapple_pac_program_b_keys(env, env->xregs[1]);
++        break;
++    case QEMU_APPLE_PAC_SET_EL0_DIVERSIFIER:
++        /*
++         * The EL0 diversifier is part of Apple's vmapple hypervisor contract.
++         * QEMU's generic TCG PAuth model has per-CPU PAC key registers but no
++         * vmapple EL0/EL1 diversifier transition hook yet, so acknowledge the
++         * call without changing EL1 keys.  If boot later reaches a userland PAC
++         * failure, this is the next bounded model to extend.
++         */
++        break;
++    case QEMU_APPLE_PAC_SET_EL0_DIVERSIFIER_AT_EL1:
++        /*
++         * See the EL0 diversifier note above.  x1 selects temporary enable or
++         * disable at EL1 and x2 supplies the diversifier seed.
++         */
++        break;
++    case QEMU_APPLE_PAC_SET_G_KEY:
++        arm_vmapple_pac_program_g_key(env, env->xregs[1]);
++        break;
++    default:
++        return false;
++    }
++
++    env->xregs[0] = QEMU_PSCI_RET_SUCCESS;
++    return true;
+ }
+ 
+ static bool arm_is_implemented_psci_function(uint64_t function_id)
+@@ -55,7 +167,7 @@ static bool arm_is_vmapple_svc_a0_hvc_call(ARMCPU *cpu)
+ 
+     return is_a64(env) &&
+            (arm_is_implemented_psci_function(env->xregs[0]) ||
+-            arm_is_vmapple_xnu_boot_hvc_function(env->xregs[0]));
++            arm_is_vmapple_pac_hvc_function(env->xregs[0]));
+ }
+ 
+ bool arm_is_psci_call(ARMCPU *cpu, int excp_type)
+@@ -139,18 +251,21 @@ void arm_handle_psci_call(ARMCPU *cpu)
+                         arm_cpu_mp_affinity(cpu));
+ 
+     if (is_a64(env) &&
+         syn_get_ec(env->exception.syndrome) == EC_AA64_HVC &&
+         FIELD_EX32(env->exception.syndrome, ISS_IMM16, IMM16) == 0 &&
+-        arm_is_vmapple_xnu_boot_hvc_function(param[0])) {
++        arm_is_vmapple_pac_hvc_function(param[0])) {
+         /*
+-         * macOS 26 XNU issues this early vmapple bootstrap HVC before
++         * macOS 26 XNU issues vmapple PAC HVCs before and after
+          * enabling SCTLR_EL1.  On Apple hardware/hypervisor-backed vmapple
+-         * this returns zero for success; under Linux TCG there is no EL2
+-         * handler, so model the successful no-op path and let XNU continue
+-         * to the following CBNZ success check.
++         * these initialize, return, and program implementation-defined
++         * ARMv8.3-PAuth keys.  Under Linux TCG there is no EL2 handler, so
++         * model the bounded vmapple PAC ABI and let XNU continue to the
++         * following CBNZ success checks.  Unknown HVC calls remain
++         * architecturally handled instead of being swallowed.
+          */
+-        ret = QEMU_PSCI_RET_SUCCESS;
+-        goto err;
++        if (arm_handle_vmapple_pac_hvc_call(env, param[0])) {
++            return;
++        }
+     }
+ 
+     if ((param[0] & QEMU_PSCI_0_2_64BIT) && !is_a64(env)) {
+-- 
+2.51.0

@@ -1,0 +1,119 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@example.com>
+Date: Tue, 1 Sep 2026 04:32:00 +0800
+Subject: [PATCH] hw/vmapple: trace BDIF device and register names
+
+The restore iBEC probes BDIF devices by encoded device ID.  The existing trace
+stream reports raw offsets and labels non-aux block reads as root, which makes
+DEVID_USB activity indistinguishable from root activity once the optional USB
+backend is enabled.
+
+Add an additional diagnostic tracepoint that names the decoded BDIF device,
+register, value, and guest PC for every read/write.  Also route vblk read labels
+through the same device-name helper so USB commands are reported as USB.  This
+does not change guest-visible device behavior and is inert unless the tracepoints
+are enabled.
+
+Signed-off-by: Codex <codex@example.com>
+---
+ hw/vmapple/bdif.c       | 53 ++++++++++++++++++++++++++++++++++++++++-
+ hw/vmapple/trace-events |  1 +
+ 2 files changed, 54 insertions(+), 1 deletion(-)
+
+diff --git a/hw/vmapple/bdif.c b/hw/vmapple/bdif.c
+index 5fb0f4c8d2..0000000000 100644
+--- a/hw/vmapple/bdif.c
++++ b/hw/vmapple/bdif.c
+@@ -91,6 +91,56 @@ static BlockBackend *bdif_backend_for_devid(VMAppleBdifState *s,
+     }
+ }
+ 
++static const char *bdif_devid_name(uint64_t devid)
++{
++    switch (devid) {
++    case DEVID_ROOT:
++        return "root";
++    case DEVID_AUX:
++        return "aux";
++    case DEVID_USB:
++        return "usb";
++    default:
++        return "unknown";
++    }
++}
++
++static const char *bdif_reg_name(hwaddr offset)
++{
++    switch (offset & ~REG_DEVID_MASK) {
++    case REG_STATUS:
++        return "status";
++    case REG_CFG:
++        return "cfg";
++    case REG_UNK1:
++        return "unk1";
++    case REG_BUSY:
++        return "busy";
++    case REG_UNK2:
++        return "unk2";
++    case REG_CMD:
++        return "cmd";
++    case REG_NEXT_DEVICE:
++        return "next-device";
++    case REG_UNK3:
++        return "unk3";
++    default:
++        return "unknown";
++    }
++}
++
++static uint64_t bdif_guest_pc(void)
++{
++    return current_cpu ? current_cpu->cc->get_pc(current_cpu) : 0;
++}
++
++static void bdif_trace_access(const char *op, uint64_t devid, hwaddr offset,
++                              unsigned size, uint64_t value)
++{
++    trace_bdif_access(op, bdif_devid_name(devid), bdif_reg_name(offset),
++                      offset, size, value, bdif_guest_pc());
++}
++
+ static uint64_t bdif_read(void *opaque, hwaddr offset, unsigned size)
+ {
+     VMAppleBdifState *s = opaque;
+@@ -128,6 +178,7 @@ static uint64_t bdif_read(void *opaque, hwaddr offset, unsigned size)
+         break;
+     }
+ 
++    bdif_trace_access("read", devid, offset, size, ret);
+     trace_bdif_read(offset, size, ret);
+     return ret;
+ }
+@@ -203,7 +254,7 @@ static void vblk_cmd(uint64_t devid, BlockBackend *blk, uint64_t gp_addr,
+         r = blk_pread(blk, off, req.data.len, buf, 0);
+         guest_pc = current_cpu ? current_cpu->cc->get_pc(current_cpu) : 0;
+         header = req.data.len >= sizeof(header) ? ldq_le_p(buf) : 0;
+-        trace_bdif_vblk_read(devid == DEVID_AUX ? "aux" : "root",
++        trace_bdif_vblk_read(bdif_devid_name(devid),
+                              req.data.addr, off, req.data.len, r,
+                              guest_pc, header);
+         if (r < 0) {
+@@ -234,6 +285,7 @@ static void bdif_write(void *opaque, hwaddr offset,
+     uint64_t devid = offset & REG_DEVID_MASK;
+     BlockBackend *blk = bdif_backend_for_devid(s, devid);
+ 
++    bdif_trace_access("write", devid, offset, size, value);
+     trace_bdif_write(offset, size, value);
+ 
+     switch (offset & ~REG_DEVID_MASK) {
+diff --git a/hw/vmapple/trace-events b/hw/vmapple/trace-events
+index a34a675a63..0000000000 100644
+--- a/hw/vmapple/trace-events
++++ b/hw/vmapple/trace-events
+@@ -20,3 +20,4 @@ aes_2_write(uint64_t offset, uint64_t val) "offset=0x%"PRIx64" val=0x%"PRIx64
+ bdif_read(uint64_t offset, uint32_t size, uint64_t value) "offset=0x%"PRIx64" size=0x%x value=0x%"PRIx64
+ bdif_write(uint64_t offset, uint32_t size, uint64_t value) "offset=0x%"PRIx64" size=0x%x value=0x%"PRIx64
+ bdif_vblk_read(const char *dev, uint64_t addr, uint64_t offset, uint32_t len, int r, uint64_t pc, uint64_t header) "dev=%s addr=0x%"PRIx64" off=0x%"PRIx64" size=0x%x r=%d pc=0x%"PRIx64" head=0x%016"PRIx64
++bdif_access(const char *op, const char *dev, const char *reg, uint64_t offset, uint32_t size, uint64_t value, uint64_t pc) "%s dev=%s reg=%s offset=0x%"PRIx64" size=0x%x value=0x%"PRIx64" pc=0x%"PRIx64
+-- 
+2.50.1

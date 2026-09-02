@@ -1,0 +1,61 @@
+diff --git a/vendor/qemu/hw/display/reims-vgpu-mmio.c b/vendor/qemu/hw/display/reims-vgpu-mmio.c
+index 0000000..0000000 100644
+--- a/vendor/qemu/hw/display/reims-vgpu-mmio.c
++++ b/vendor/qemu/hw/display/reims-vgpu-mmio.c
+@@ -645,6 +645,42 @@ static void reims_vgpu_mmio_apply_action(ReimsVGPUMMIOState *s,
+     }
+ }
+ 
++/*
++ * Pre-boundary firmware console: copy the guest-programmed EFI framebuffer
++ * (GFX MMIO 0x1210 + stride 0x1228) into QEMU's DisplaySurface.
++ *
++ * Unlike PCI there is no BAR1 GOP RAM fallback on this MMIO device. A failed
++ * copy therefore leaves the existing surface untouched; the caller must not
++ * fall through and re-push a stale product frame while Rust says firmware owns
++ * the console.
++ */
++static bool reims_vgpu_mmio_copy_early_console(ReimsVGPUMMIOState *s)
++{
++    uint8_t *dst;
++    uint32_t dst_stride;
++    int rc;
++
++    if (s->rust_handle == 0 || !s->con) {
++        return false;
++    }
++    if (!s->surface ||
++        surface_width(s->surface) != REIMS_VGPU_MMIO_EFI_W ||
++        surface_height(s->surface) != REIMS_VGPU_MMIO_EFI_H) {
++        reims_vgpu_mmio_set_mode(s, REIMS_VGPU_MMIO_EFI_W,
++                                 REIMS_VGPU_MMIO_EFI_H);
++        if (!s->surface) {
++            return false;
++        }
++    }
++
++    dst = surface_data(s->surface);
++    dst_stride = surface_stride(s->surface);
++    rc = reims_vgpu_qemu_efi_console_copy(s->rust_handle, dst, dst_stride,
++                                          REIMS_VGPU_MMIO_EFI_W,
++                                          REIMS_VGPU_MMIO_EFI_H);
++    return rc == REIMS_VGPU_QEMU_OK;
++}
++
+ static void reims_vgpu_mmio_bh(void *opaque)
+ {
+     ReimsVGPUMMIOState *s = opaque;
+@@ -758,6 +794,13 @@ static bool reims_vgpu_mmio_fb_update(void *opaque)
+             s->new_frame_ready = false;
+         }
+         return true;
++    }
++    if (rc == REIMS_VGPU_QEMU_OK && kind == REIMS_VGPU_CONSOLE_FEED_FIRMWARE) {
++        if (reims_vgpu_mmio_copy_early_console(s)) {
++            qemu_console_update_full(s->con);
++            s->new_frame_ready = false;
++        }
++        return true;
+     }
+ 
+     /* Post-boundary: hostPresentCount re-show of guest-finished frame only. */

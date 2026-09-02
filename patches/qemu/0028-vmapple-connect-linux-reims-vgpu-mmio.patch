@@ -1,0 +1,144 @@
+From 2a6e13f21d27bfe7d1a069ddaa71f78df87bd7f3 Mon Sep 17 00:00:00 2001
+From: MacVM Project <macvm@localhost>
+Date: Tue, 1 Sep 2026 18:00:00 +0800
+Subject: [PATCH] hw/vmapple: connect Linux Reims PVG MMIO backend
+
+Replace the non-Apple PVG sentinels with the pinned Reims protocol and Vulkan
+backend when vmapple is built for TCG.  Keep the external implementation pinned
+under third_party/reims-vgpu and generate only the Linux host adaptations for
+ARM register reads and stable contiguous RAMBlock views.
+
+The native ParavirtualizedGraphics.framework device remains the first choice
+when CONFIG_MAC_PVG_MMIO is available.  Builds without either real backend keep
+the existing explicit unimplemented sentinels.
+---
+ hw/display/Kconfig       |  7 +++++++
+ hw/display/meson.build   | 42 ++++++++++++++++++++++++++++++++++++++++++
+ hw/display/trace-events  | 12 ++++++++++++
+ hw/vmapple/Kconfig       |  1 +
+ hw/vmapple/vmapple.c     | 11 +++++++++++
+ 5 files changed, 73 insertions(+)
+
+diff --git a/hw/display/Kconfig b/hw/display/Kconfig
+index 4b0541d..dc45e53 100644
+--- a/hw/display/Kconfig
++++ b/hw/display/Kconfig
+@@ -153,3 +153,10 @@ config MAC_PVG_PCI
+     bool
+     depends on MAC_PVG && PCI
+     default y if PCI_DEVICES
++
++config MACVM_REIMS_VGPU
++    bool
++    depends on AARCH64 && TCG
++    default y
++    help
++      Linux host implementation of the VMApple PVG and IOSurface MMIO ABI.
+diff --git a/hw/display/meson.build b/hw/display/meson.build
+index 7db4b72..32e5f1f 100644
+--- a/hw/display/meson.build
++++ b/hw/display/meson.build
+@@ -67,6 +67,48 @@ system_ss.add(when: 'CONFIG_ATI_VGA', if_true: [files('ati.c', 'ati_2d.c'), pixm
+ system_ss.add(when: [pvg, 'CONFIG_MAC_PVG_PCI'],     if_true: [files('apple-gfx.m', 'apple-gfx-pci.m')])
+ system_ss.add(when: [pvg, 'CONFIG_MAC_PVG_MMIO'],    if_true: [files('apple-gfx.m', 'apple-gfx-mmio.m')])
+ 
++if config_all_devices.has_key('CONFIG_MACVM_REIMS_VGPU')
++  macvm_repo_dir = meson.global_source_root() / '..' / '..'
++  reims_vgpu_repo_dir = meson.global_source_root() / '..' / 'reims-vgpu'
++  reims_vgpu_qemu_dir = reims_vgpu_repo_dir / 'vendor' / 'qemu'
++  reims_vgpu_qemu_display_dir = reims_vgpu_qemu_dir / 'hw' / 'display'
++  reims_vgpu_abi_dir = reims_vgpu_repo_dir / 'crates' / 'reims-vgpu' / 'include'
++  reims_vgpu_mmio_source = reims_vgpu_qemu_display_dir / 'reims-vgpu-mmio.c'
++  reims_vgpu_prepare = macvm_repo_dir / 'tools' / 'prepare_reims_qemu_mmio.py'
++
++  macvm_reims_vgpu_mmio = custom_target('macvm-reims-vgpu-mmio-source',
++    input: reims_vgpu_mmio_source,
++    output: 'macvm-reims-vgpu-mmio.c',
++    command: [python, reims_vgpu_prepare, '@INPUT@', '@OUTPUT@'])
++
++  cargo = find_program('cargo')
++  reims_vgpu_built = reims_vgpu_repo_dir / 'target' / 'release' / 'libreims_vgpu.a'
++  reims_vgpu_a = custom_target('macvm-reims-vgpu-staticlib',
++    output: 'libreims_vgpu.a',
++    console: true,
++    build_always_stale: true,
++    command: [find_program('sh'), '-c',
++      '"' + cargo.full_path() + '" build --release --locked ' +
++      '--manifest-path "' + reims_vgpu_repo_dir + '/Cargo.toml" ' +
++      '-p reims-vgpu --no-default-features --features backend-vulkan ' +
++      '&& ( cmp -s "' + reims_vgpu_built + '" "@OUTPUT@" || ' +
++      'cp "' + reims_vgpu_built + '" "@OUTPUT@" )'])
++
++  reims_vgpu_dep = declare_dependency(
++    link_with: reims_vgpu_a,
++    link_args: ['-lm', '-ldl', '-lpthread'],
++    compile_args: [
++      '-I' + reims_vgpu_abi_dir,
++      '-I' + reims_vgpu_qemu_display_dir,
++    ])
++  system_ss.add(when: 'CONFIG_MACVM_REIMS_VGPU', if_true: [
++    macvm_reims_vgpu_mmio,
++    files(reims_vgpu_qemu_display_dir / 'reims-vgpu-dirty.c'),
++    files(reims_vgpu_qemu_display_dir / 'reims-vgpu-shim.c'),
++    reims_vgpu_dep,
++  ])
++endif
++
+ if config_all_devices.has_key('CONFIG_VIRTIO_GPU')
+   virtio_gpu_ss = ss.source_set()
+   virtio_gpu_ss.add(when: 'CONFIG_VIRTIO_GPU',
+diff --git a/hw/display/trace-events b/hw/display/trace-events
+index df674f0..c251b30 100644
+--- a/hw/display/trace-events
++++ b/hw/display/trace-events
+@@ -225,4 +225,16 @@ apple_gfx_iosfc_map_memory_new_region(size_t i, void *region, uint64_t start, uin
+ apple_gfx_iosfc_unmap_memory(void *a, void *b, void *c, void *d, void *e, void *f) "a=%p b=%p c=%p d=%p e=%p f=%p"
+ apple_gfx_iosfc_unmap_memory_region(void* mem, void *region) "unmapping @ %p from memory region %p"
+ apple_gfx_iosfc_raise_irq(uint32_t vector) "vector=0x%x"
++
++# macvm generated reims-vgpu-mmio.c
++reims_vgpu_mmio_realize(uint64_t handle, const char *backend) "handle=0x%"PRIx64" backend=%s"
++reims_vgpu_mmio_gfx_read(uint64_t offset, uint64_t val) "offset=0x%"PRIx64" val=0x%"PRIx64
++reims_vgpu_mmio_gfx_write(uint64_t offset, uint64_t val) "offset=0x%"PRIx64" val=0x%"PRIx64
++reims_vgpu_mmio_iosfc_read(uint64_t offset, uint64_t val) "offset=0x%"PRIx64" val=0x%"PRIx64
++reims_vgpu_mmio_iosfc_write(uint64_t offset, uint64_t val) "offset=0x%"PRIx64" val=0x%"PRIx64
++reims_vgpu_mmio_irq_gfx(void) "pulse gfx IRQ"
++reims_vgpu_mmio_irq_iosfc(void) "pulse iosfc IRQ"
++reims_vgpu_mmio_scanout(uint64_t mapping_id, uint64_t width, uint64_t height) "mapping=%"PRIu64" %"PRIu64"x%"PRIu64
++reims_vgpu_mmio_mode_change(uint64_t width, uint64_t height) "mode=%"PRIu64"x%"PRIu64
++reims_vgpu_mmio_cursor(uint64_t x, uint64_t y, uint64_t show) "x=%"PRIu64" y=%"PRIu64" show=%"PRIu64
+ 
+diff --git a/hw/vmapple/Kconfig b/hw/vmapple/Kconfig
+index 379a9f0..a9fa449 100644
+--- a/hw/vmapple/Kconfig
++++ b/hw/vmapple/Kconfig
+@@ -32,4 +32,5 @@ config VMAPPLE
+     select VMAPPLE_CFG
+     select MAC_PVG_MMIO if HVF
++    select MACVM_REIMS_VGPU if TCG
+     select UNIMP if !MAC_PVG_MMIO
+     select VMAPPLE_VIRTIO_BLK
+diff --git a/hw/vmapple/vmapple.c b/hw/vmapple/vmapple.c
+index 8c90214..be7b3f1 100644
+--- a/hw/vmapple/vmapple.c
++++ b/hw/vmapple/vmapple.c
+@@ -218,6 +218,17 @@ static void create_gfx(VMAppleMachineState *vms, MemoryRegion *mem)
+     sysbus_connect_irq(gfx, 0, qdev_get_gpio_in(vms->gic, irq_gfx));
+     sysbus_connect_irq(gfx, 1, qdev_get_gpio_in(vms->gic, irq_iosfc));
+     sysbus_realize_and_unref(gfx, &error_fatal);
++#elif defined(CONFIG_MACVM_REIMS_VGPU)
++    int irq_gfx = vms->irqmap[VMAPPLE_APV_GFX];
++    int irq_iosfc = vms->irqmap[VMAPPLE_APV_IOSFC];
++    SysBusDevice *gfx;
++
++    gfx = SYS_BUS_DEVICE(qdev_new("reims-vgpu-mmio"));
++    sysbus_mmio_map(gfx, 0, vms->memmap[VMAPPLE_APV_GFX].base);
++    sysbus_mmio_map(gfx, 1, vms->memmap[VMAPPLE_APV_IOSFC].base);
++    sysbus_connect_irq(gfx, 0, qdev_get_gpio_in(vms->gic, irq_gfx));
++    sysbus_connect_irq(gfx, 1, qdev_get_gpio_in(vms->gic, irq_iosfc));
++    sysbus_realize_and_unref(gfx, &error_fatal);
+ #else
+     /*
+      * Keep the Apple PVG address ranges visible while building the vmapple
+-- 
+2.50.1

@@ -1,0 +1,121 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@example.com>
+Date: Tue, 1 Sep 2026 05:28:00 +0800
+Subject: [PATCH] hw/vmapple: keep USB restore BDIF transfers pending
+
+The vma2 restore iBEC uses the USB BDIF function as a restore transport, not as
+an aux/root-style sector block device.  It submits a single host-output
+descriptor whose length is the restore packet capacity (for example 0x80e or
+0x100006), with no sector/data/retval descriptor triplet.
+
+The old vblk emulation treated that descriptor as the sector descriptor,
+completed it as a failed block request, and left iBEC to consume an all-zero
+restore packet.  Stage2 then reached the command prompt and panicked on the
+invalid packet type.
+
+Keep those USB restore transfers pending instead.  With no restore host stream
+attached, REG_BUSY remains not-ready for USB so iBEC waits for a real host
+packet rather than executing a bogus zero packet.
+
+Signed-off-by: Codex <codex@example.com>
+---
+ hw/vmapple/bdif.c | 41 +++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 37 insertions(+), 4 deletions(-)
+
+diff --git a/hw/vmapple/bdif.c b/hw/vmapple/bdif.c
+index 0000000000..0000000000 100644
+--- a/hw/vmapple/bdif.c
++++ b/hw/vmapple/bdif.c
+@@ -29,6 +29,7 @@ struct VMAppleBdifState {
+     BlockBackend *aux;
+     BlockBackend *root;
+     BlockBackend *usb;
++    bool usb_restore_pending;
+     MemoryRegion mmio;
+ };
+ 
+@@ -74,6 +75,23 @@ typedef struct VblkReq {
+ #define VBLK_RET_SUCCESS  0
+ #define VBLK_RET_FAILED   1
+ 
++#define VBLK_USB_RESTORE_FLAGS 0x00020001
++
++static bool bdif_is_usb_restore_transfer(uint64_t devid, const VblkReq *req)
++{
++    if (devid != DEVID_USB) {
++        return false;
++    }
++
++    return req->sector.addr &&
++           req->sector.len > sizeof(VblkSector) &&
++           req->sector.flags == VBLK_USB_RESTORE_FLAGS &&
++           req->data.addr == 0 && req->data.len == 0 &&
++           req->data.flags == 0 &&
++           req->retval.addr == 0 && req->retval.len == 0 &&
++           req->retval.flags == 0;
++}
++
+ static BlockBackend *bdif_backend_for_devid(VMAppleBdifState *s,
+                                             uint64_t devid)
+ {
+@@ -161,7 +179,11 @@ static uint64_t bdif_read(void *opaque, hwaddr offset, unsigned size)
+         ret = present ? 0x420 : 0;
+         break;
+     case REG_BUSY:
+-        ret = present ? REG_BUSY_READY : 0;
++        if (devid == DEVID_USB && s->usb_restore_pending) {
++            ret = 0;
++        } else {
++            ret = present ? REG_BUSY_READY : 0;
++        }
+         break;
+     case REG_UNK2:
+         ret = present ? 0x1 : 0;
+@@ -207,8 +229,8 @@ static void le2cpu_req(VblkReq *req)
+     le2cpu_reqcmd(&req->retval);
+ }
+ 
+-static void vblk_cmd(uint64_t devid, BlockBackend *blk, uint64_t gp_addr,
+-                     uint64_t static_off)
++static void vblk_cmd(VMAppleBdifState *s, uint64_t devid, BlockBackend *blk,
++                     uint64_t gp_addr, uint64_t static_off)
+ {
+     VblkReq req;
+     VblkSector sector;
+@@ -242,6 +264,14 @@ static void vblk_cmd(uint64_t devid, BlockBackend *blk, uint64_t gp_addr,
+     trace_bdif_vblk_desc(bdif_devid_name(devid), "retval", req.retval.addr,
+                          req.retval.len, req.retval.flags, guest_pc);
+ 
++    if (bdif_is_usb_restore_transfer(devid, &req)) {
++        s->usb_restore_pending = true;
++        trace_bdif_vblk_error(bdif_devid_name(devid), "usb-restore-pending",
++                              gp_addr, req.sector.len, req.sector.flags,
++                              guest_pc);
++        return;
++    }
++
+     if (req.sector.len != sizeof(sector)) {
+         trace_bdif_vblk_error(bdif_devid_name(devid), "sector-len", gp_addr,
+                               req.sector.len, sizeof(sector), guest_pc);
+@@ -310,6 +340,10 @@ static void vblk_cmd(uint64_t devid, BlockBackend *blk, uint64_t gp_addr,
+         break;
+     }
+ 
++    if (devid == DEVID_USB) {
++        s->usb_restore_pending = false;
++    }
++
+ out:
+     dma_memory_write(&address_space_memory, req.retval.addr, &ret, 1,
+                      MEMTXATTRS_UNSPECIFIED);
+@@ -331,7 +365,7 @@ static void bdif_write(void *opaque, hwaddr offset,
+     switch (offset & ~REG_DEVID_MASK) {
+     case REG_CMD:
+         if (blk) {
+-            vblk_cmd(devid, blk, value, 0x0);
++            vblk_cmd(s, devid, blk, value, 0x0);
+         }
+         break;
+     }
+-- 
+2.50.1

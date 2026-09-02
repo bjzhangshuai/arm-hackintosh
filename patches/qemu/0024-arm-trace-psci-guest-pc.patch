@@ -1,0 +1,44 @@
+From a2ba514b4cbba50c1d5c603321f1a81f2cf109f0 Mon Sep 17 00:00:00 2001
+From: MacVM Project <macvm@localhost>
+Date: Tue, 1 Sep 2026 15:18:00 +0800
+Subject: [PATCH] target/arm: include guest PC in PSCI trace
+
+macOS 26 now brings all secondary CPUs online and then issues
+PSCI_SYSTEM_RESET from CPU1.  The existing arm_psci_call event records the
+function and arguments but not the guest call site, which prevents a bounded
+GDB breakpoint from capturing the panic path before QEMU resets the machine.
+
+Add the current guest PC to the existing trace event.  This is diagnostic only
+and does not alter PSCI or guest execution semantics.
+---
+ target/arm/tcg/psci.c   | 2 +-
+ target/arm/trace-events | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/target/arm/tcg/psci.c b/target/arm/tcg/psci.c
+index a43677e8ad..3ac5d3538b 100644
+--- a/target/arm/tcg/psci.c
++++ b/target/arm/tcg/psci.c
+@@ -297,7 +297,7 @@ void arm_handle_psci_call(ARMCPU *cpu)
+         param[i] = is_a64(env) ? env->xregs[i] : env->regs[i];
+     }
+     trace_arm_psci_call(param[0], param[1], param[2], param[3],
+-                        arm_cpu_mp_affinity(cpu));
++                        arm_cpu_mp_affinity(cpu), env->pc);
+ 
+     if (is_a64(env) &&
+         syn_get_ec(env->exception.syndrome) == EC_AA64_HVC &&
+diff --git a/target/arm/trace-events b/target/arm/trace-events
+index 6f20045a86..cc21b50b0c 100644
+--- a/target/arm/trace-events
++++ b/target/arm/trace-events
+@@ -25,6 +25,6 @@ arm_powerctl_reset_cpu(uint64_t mp_aff) "cpu %" PRIu64
+ 
+ # tcg/psci.c and hvf/hvf.c
+-arm_psci_call(uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3, uint32_t cpuid) "PSCI Call x0=0x%016"PRIx64" x1=0x%016"PRIx64" x2=0x%016"PRIx64" x3=0x%016"PRIx64" cpuid=0x%x"
++arm_psci_call(uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3, uint32_t cpuid, uint64_t pc) "PSCI Call x0=0x%016"PRIx64" x1=0x%016"PRIx64" x2=0x%016"PRIx64" x3=0x%016"PRIx64" cpuid=0x%x pc=0x%016"PRIx64
+ 
+ # machine.c
+ cpu_post_load(uint32_t cpreg_vmstate_array_len, uint32_t cpreg_array_len) "cpreg_vmstate_array_len=%d cpreg_array_len=%d"
+-- 
+2.51.0

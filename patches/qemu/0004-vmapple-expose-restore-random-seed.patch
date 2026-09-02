@@ -1,0 +1,62 @@
+From 8d5c6f8536fb3a2a31b22cc41685d2fc4456404d Mon Sep 17 00:00:00 2001
+From: MacVM Project <macvm@localhost>
+Date: Mon, 31 Aug 2026 19:05:00 +0800
+Subject: [PATCH] hw/vmapple: expose a fixed restore random seed
+
+AVPBooter derives the restore generator by repeating the 32-bit random
+value in the VMApple configuration page.  A fresh random value on every
+launch makes a previously issued TSS ticket fail its BNCH comparison and
+prevents reproducible restore testing.
+
+Add a vmapple machine property that accepts a fixed nonzero value.  Keep
+zero as the default so ordinary launches retain the existing random
+behavior.  The property changes only guest-visible configuration data and
+does not weaken image validation.
+---
+ hw/vmapple/vmapple.c | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/hw/vmapple/vmapple.c b/hw/vmapple/vmapple.c
+index 607181f..a0d5d65 100644
+--- a/hw/vmapple/vmapple.c
++++ b/hw/vmapple/vmapple.c
+@@ -68,6 +68,7 @@ struct VMAppleMachineState {
+     MemoryRegion fw_mr;
+     MemoryRegion ecam_alias;
+     uint64_t uuid;
++    uint32_t rnd;
+ };
+ 
+ #define TYPE_VMAPPLE_MACHINE   MACHINE_TYPE_NAME("vmapple")
+@@ -182,13 +183,15 @@ static bool create_cfg(VMAppleMachineState *vms, MemoryRegion *mem,
+     ERRP_GUARD();
+     SysBusDevice *cfg;
+     MachineState *machine = MACHINE(vms);
+-    uint32_t rnd = 1;
++    uint32_t rnd = vms->rnd;
+ 
+     vms->cfg = qdev_new(TYPE_VMAPPLE_CFG);
+     cfg = SYS_BUS_DEVICE(vms->cfg);
+     sysbus_mmio_map(cfg, 0, vms->memmap[VMAPPLE_CONFIG].base);
+ 
+-    qemu_guest_getrandom_nofail(&rnd, sizeof(rnd));
++    if (!rnd) {
++        qemu_guest_getrandom_nofail(&rnd, sizeof(rnd));
++    }
+ 
+     qdev_prop_set_uint32(vms->cfg, "nr-cpus", machine->smp.cpus);
+     qdev_prop_set_uint64(vms->cfg, "ecid", vms->uuid);
+@@ -601,6 +604,10 @@ static void vmapple_instance_init(Object *obj)
+     object_property_add_uint64_ptr(obj, "uuid", &vms->uuid,
+                                    OBJ_PROP_FLAG_READWRITE);
+     object_property_set_description(obj, "uuid", "Machine UUID (SDOM)");
++    object_property_add_uint32_ptr(obj, "rnd", &vms->rnd,
++                                   OBJ_PROP_FLAG_READWRITE);
++    object_property_set_description(
++        obj, "rnd", "Fixed nonzero restore random value; zero selects random");
+ }
+ 
+ static const TypeInfo vmapple_machine_info = {
+-- 
+2.50.1
+

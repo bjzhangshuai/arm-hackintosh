@@ -1,0 +1,30 @@
+# Release: on version tag, build + test + attach a meson dist tarball.
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  dist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            meson ninja-build pkg-config clang \
+            libvulkan-dev vulkan-tools \
+            vulkan-validationlayers mesa-vulkan-drivers \
+            glslang-tools spirv-tools
+      - name: build + test
+        run: |
+          meson setup build
+          meson test -C build --print-errorlogs
+      - name: dist tarball
+        run: meson dist -C build --no-tests
+      - name: release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/meson-dist/*

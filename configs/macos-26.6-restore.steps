@@ -1,0 +1,15 @@
+send:0202
+expect:0402
+recovery-open
+upload-file:/home/macvm/macos-restore/26.6/restore-chain/RestoreTrustCache.094-96989-085.localpolicy-ticket.img4
+command:firmware
+expect:0100
+upload-file:/home/macvm/macos-restore/26.6/restore-chain/RestoreRamDisk.094-96989-085.localpolicy-ticket.img4
+command:ramdisk
+expect:0100
+upload-file:/home/macvm/macos-restore/26.6/restore-chain/RestoreDeviceTree.vma2macosap.localpolicy-ticket.img4
+command:devicetree
+expect:0100
+upload-file:/home/macvm/macos-restore/26.6/restore-chain/RestoreKernelCache.release.vma2.localpolicy-ticket.img4
+command:bootx
+expect:0100

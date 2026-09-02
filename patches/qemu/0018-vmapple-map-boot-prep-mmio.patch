@@ -1,0 +1,74 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@example.com>
+Date: Tue, 1 Sep 2026 15:42:00 +0800
+Subject: [PATCH] hw/vmapple: map Linux TCG boot-prep MMIO sentinel
+
+The restore iBEC bootx path accepts the LocalPolicy-bound RestoreKernelCache
+and then reads a fixed 32-bit register at 0x30240040.  The Linux TCG vmapple
+map currently covers PVG, IOSFC, and AES through 0x30233fff but leaves the
+next 0x30240000 window unmapped, so that probe raises a data abort before the
+boot path can continue.
+
+Map the 0x30240000..0x3024ffff range as an unimplemented-device sentinel on
+the non-MAC_PVG_MMIO path.  This intentionally is not a real Apple device; it
+keeps the access observable and returns zero for the unsupported read instead
+of crashing the guest.  The MAC_PVG_MMIO/HVF path is left untouched.
+
+Signed-off-by: Codex <codex@example.com>
+---
+ hw/vmapple/vmapple.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/hw/vmapple/vmapple.c b/hw/vmapple/vmapple.c
+index a36a5f2..af8cd5f 100644
+--- a/hw/vmapple/vmapple.c
++++ b/hw/vmapple/vmapple.c
+@@ -100,6 +100,7 @@ enum {
+     VMAPPLE_APV_IOSFC,
+     VMAPPLE_AES_1,
+     VMAPPLE_AES_2,
++    VMAPPLE_BOOT_PREP_MMIO,
+     VMAPPLE_BDOOR,
+     VMAPPLE_MEMMAP_LAST,
+ };
+@@ -121,6 +122,7 @@ static const MemMapEntry memmap[] = {
+     [VMAPPLE_APV_IOSFC] =          { 0x30210000, 0x00010000 },
+     [VMAPPLE_AES_1] =              { 0x30220000, 0x00004000 },
+     [VMAPPLE_AES_2] =              { 0x30230000, 0x00004000 },
++    [VMAPPLE_BOOT_PREP_MMIO] =     { 0x30240000, 0x00010000 },
+     [VMAPPLE_PCIE_ECAM] =          { 0x40000000, 0x10000000 },
+     [VMAPPLE_PCIE_MMIO] =          { 0x50000000, 0x1fff0000 },
+ 
+@@ -268,6 +270,22 @@ static void create_gfx(VMAppleMachineState *vms, MemoryRegion *mem)
+ #endif
+ }
+ 
++static void create_boot_prep_mmio(VMAppleMachineState *vms)
++{
++#ifndef CONFIG_MAC_PVG_MMIO
++    /*
++     * macOS restore iBEC's bootx path reads a fixed 32-bit register at
++     * 0x30240040 after accepting the LocalPolicy-bound RestoreKernelCache.
++     * On Linux TCG there is no Apple framework device behind this range yet;
++     * map a visible sentinel so the unsupported read returns zero and remains
++     * observable instead of raising a data abort.
++     */
++    create_unimplemented_device("vmapple-boot-prep-mmio",
++                                vms->memmap[VMAPPLE_BOOT_PREP_MMIO].base,
++                                vms->memmap[VMAPPLE_BOOT_PREP_MMIO].size);
++#endif
++}
++
+ static void create_aes(VMAppleMachineState *vms, MemoryRegion *mem)
+ {
+     int irq = vms->irqmap[VMAPPLE_AES_1];
+@@ -553,6 +571,7 @@ static void mach_vmapple_init(MachineState *machine)
+     create_pvpanic(vms, sysmem);
+     create_aes(vms, sysmem);
+     create_gfx(vms, sysmem);
++    create_boot_prep_mmio(vms);
+     create_uart(vms, VMAPPLE_UART, sysmem, serial_hd(0));
+     create_rtc(vms);
+     create_pcie(vms);
+-- 
+2.50.1

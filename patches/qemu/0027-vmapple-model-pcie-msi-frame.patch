@@ -1,0 +1,128 @@
+From b5eb476482a354c2b1ed948840de0f527464d894 Mon Sep 17 00:00:00 2001
+From: MacVM Project <macvm@localhost>
+Date: Tue, 1 Sep 2026 16:32:00 +0800
+Subject: [PATCH] hw/vmapple: model the PCI message interrupt frame
+
+The macOS 26 vma2 device tree exposes a third GIC register range at bus
+offset 0x0fff0000.  With the arm-io range translation this is physical
+0x1fff0000.  AppleVirtualPlatformPCIEMSIController maps that range, reads its
+type register at offset 0x8, and uses the message register at offset 0x40.
+
+This is the GICv2m-compatible message interrupt frame already implemented by
+QEMU.  Instantiate it for vmapple at the address described by Apple's device
+tree, give it the otherwise-unused SPI range 80..143, and connect its outputs
+to the existing GICv3.
+
+Apple's virtual-platform ABI additionally requires bit 31 of MSI_TYPER to
+mark the frame valid.  Add an opt-in property to the generic GICv2m model for
+that bit.  Its default is false, preserving the register value of every
+existing machine; only vmapple enables it.
+---
+ hw/intc/arm_gicv2m.c    |  7 ++++++-
+ hw/vmapple/vmapple.c    | 33 +++++++++++++++++++++++++++++++++
+ 2 files changed, 39 insertions(+), 1 deletion(-)
+
+diff --git a/hw/intc/arm_gicv2m.c b/hw/intc/arm_gicv2m.c
+--- a/hw/intc/arm_gicv2m.c
++++ b/hw/intc/arm_gicv2m.c
+@@ -57,6 +57,7 @@ struct ARMGICv2mState {
+ 
+     uint32_t base_spi;
+     uint32_t num_spi;
++    bool msi_typer_valid;
+ };
+ 
+ static void gicv2m_set_irq(void *opaque, int irq)
+@@ -80,7 +81,10 @@ static uint64_t gicv2m_read(void *opaque, hwaddr offset,
+     switch (offset) {
+     case V2M_MSI_TYPER:
+         val = (s->base_spi + 32) << 16;
+-        val |= s->num_spi;
++        val |= s->num_spi;
++        if (s->msi_typer_valid) {
++            val |= 1U << 31;
++        }
+         return val;
+     case V2M_MSI_IIDR:
+         /* We don't have any valid implementor so we leave that field as zero
+@@ -176,5 +180,6 @@ static const Property gicv2m_properties[] = {
+     DEFINE_PROP_UINT32("base-spi", ARMGICv2mState, base_spi, 0),
+     DEFINE_PROP_UINT32("num-spi", ARMGICv2mState, num_spi, 64),
++    DEFINE_PROP_BOOL("msi-typer-valid", ARMGICv2mState, msi_typer_valid, false),
+ };
+ 
+ static void gicv2m_class_init(ObjectClass *klass, const void *data)
+diff --git a/hw/vmapple/vmapple.c b/hw/vmapple/vmapple.c
+--- a/hw/vmapple/vmapple.c
++++ b/hw/vmapple/vmapple.c
+@@ -92,6 +92,7 @@ enum {
+     VMAPPLE_MEM,
+     VMAPPLE_GIC_DIST,
+     VMAPPLE_GIC_REDIST,
++    VMAPPLE_GIC_MSI,
+     VMAPPLE_UART,
+     VMAPPLE_RTC,
+     VMAPPLE_PCIE,
+@@ -116,6 +117,7 @@ static const MemMapEntry memmap[] = {
+ 
+     [VMAPPLE_GIC_DIST] =           { 0x10000000, 0x00010000 },
+     [VMAPPLE_GIC_REDIST] =         { 0x10010000, 0x00400000 },
++    [VMAPPLE_GIC_MSI] =            { 0x1fff0000, 0x00010000 },
+ 
+     [VMAPPLE_UART] =               { 0x20010000, 0x00010000 },
+     [VMAPPLE_RTC] =                { 0x20050000, 0x00001000 },
+@@ -319,7 +321,10 @@ static void create_aes(VMAppleMachineState *vms, MemoryRegion *mem)
+     sysbus_connect_irq(aes, 0, qdev_get_gpio_in(vms->gic, irq));
+     sysbus_realize_and_unref(aes, &error_fatal);
+ }
+ 
++#define VMAPPLE_MSI_IRQ_BASE 0x30
++#define VMAPPLE_MSI_NUM_IRQS 64
++
+ static int arm_gic_ppi_index(int cpu_nr, int ppi_index)
+ {
+     return NUM_IRQS + cpu_nr * GIC_INTERNAL + ppi_index;
+@@ -376,6 +381,33 @@ static void create_gic(VMAppleMachineState *vms, MemoryRegion *mem)
+     }
+ }
+ 
++static void create_msi(VMAppleMachineState *vms)
++{
++    DeviceState *dev;
++    SysBusDevice *sbd;
++    int i;
++
++    dev = qdev_new("arm-gicv2m");
++    qdev_prop_set_uint32(dev, "base-spi", VMAPPLE_MSI_IRQ_BASE);
++    qdev_prop_set_uint32(dev, "num-spi", VMAPPLE_MSI_NUM_IRQS);
++    qdev_prop_set_bit(dev, "msi-typer-valid", true);
++
++    sbd = SYS_BUS_DEVICE(dev);
++    sysbus_realize_and_unref(sbd, &error_fatal);
++    sysbus_mmio_map(sbd, 0, vms->memmap[VMAPPLE_GIC_MSI].base);
++
++    /*
++     * GICv2m base-spi is an external GIC input index.  The frame reports
++     * interrupt IDs base-spi + 32 to the guest and pulses these same GIC
++     * inputs when macOS writes an ID to MSI_SETSPI_NS at frame offset 0x40.
++     */
++    for (i = 0; i < VMAPPLE_MSI_NUM_IRQS; i++) {
++        sysbus_connect_irq(sbd, i,
++                           qdev_get_gpio_in(vms->gic,
++                                            VMAPPLE_MSI_IRQ_BASE + i));
++    }
++}
++
+ static void create_uart(const VMAppleMachineState *vms, int uart,
+                         MemoryRegion *mem, Chardev *chr)
+ {
+@@ -635,6 +665,7 @@ static void mach_vmapple_init(MachineState *machine)
+     create_iboot_low_scratch(vms, sysmem);
+ 
+     create_gic(vms, sysmem);
++    create_msi(vms);
+     create_bdif(vms, sysmem);
+     create_pvpanic(vms, sysmem);
+     create_aes(vms, sysmem);
+-- 
+2.51.0

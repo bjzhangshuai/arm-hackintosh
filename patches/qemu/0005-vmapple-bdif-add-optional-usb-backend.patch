@@ -1,0 +1,152 @@
+From 0d6b5c4a3f2918071625344b5c6d7e8f90123456 Mon Sep 17 00:00:00 2001
+From: MacVM Validation <validation@localhost>
+Date: Mon, 31 Aug 2026 22:35:00 +0800
+Subject: [PATCH] hw/vmapple: add optional BDIF USB block backend
+
+iBEC probes the VMApple BDIF USB device while entering restore mode.  The
+existing model exposed root and aux block devices, but the generic register
+read path made every DEVID look active even when no backend existed.  That
+caused the guest to see a present USB transport whose command path could never
+complete.
+
+Gate the register status on an actual backend, add an optional USB BlockBackend,
+and route DEVID_USB commands to it when supplied as pflash index 2.  No USB
+backend is required for the existing aux/root boot path.
+---
+ hw/vmapple/bdif.c    | 43 +++++++++++++++++++++++++-----
+ hw/vmapple/vmapple.c |  6 +++++
+ 2 files changed, 36 insertions(+), 7 deletions(-)
+
+diff --git a/hw/vmapple/bdif.c b/hw/vmapple/bdif.c
+index dcf71ed81a..5fb0f4c8d2 100644
+--- a/hw/vmapple/bdif.c
++++ b/hw/vmapple/bdif.c
+@@ -28,6 +28,7 @@ struct VMAppleBdifState {
+ 
+     BlockBackend *aux;
+     BlockBackend *root;
++    BlockBackend *usb;
+     MemoryRegion mmio;
+ };
+ 
+@@ -75,29 +76,46 @@ typedef struct VblkReq {
+ #define VBLK_RET_SUCCESS  0
+ #define VBLK_RET_FAILED   1
+ 
++static BlockBackend *bdif_backend_for_devid(VMAppleBdifState *s,
++                                            uint64_t devid)
++{
++    switch (devid) {
++    case DEVID_ROOT:
++        return s->root;
++    case DEVID_AUX:
++        return s->aux;
++    case DEVID_USB:
++        return s->usb;
++    default:
++        return NULL;
++    }
++}
++
+ static uint64_t bdif_read(void *opaque, hwaddr offset, unsigned size)
+ {
++    VMAppleBdifState *s = opaque;
+     uint64_t ret = -1;
+     uint64_t devid = offset & REG_DEVID_MASK;
++    bool present = bdif_backend_for_devid(s, devid) != NULL;
+ 
+     switch (offset & ~REG_DEVID_MASK) {
+     case REG_STATUS:
+-        ret = REG_STATUS_ACTIVE;
++        ret = present ? REG_STATUS_ACTIVE : 0;
+         break;
+     case REG_CFG:
+-        ret = REG_CFG_ACTIVE;
++        ret = present ? REG_CFG_ACTIVE : 0;
+         break;
+     case REG_UNK1:
+-        ret = 0x420;
++        ret = present ? 0x420 : 0;
+         break;
+     case REG_BUSY:
+-        ret = REG_BUSY_READY;
++        ret = present ? REG_BUSY_READY : 0;
+         break;
+     case REG_UNK2:
+-        ret = 0x1;
++        ret = present ? 0x1 : 0;
+         break;
+     case REG_UNK3:
+-        ret = 0x0;
++        ret = present ? 0x0 : -1;
+         break;
+     case REG_NEXT_DEVICE:
+         switch (devid) {
+@@ -104,6 +136,9 @@ static uint64_t bdif_read(void *opaque, hwaddr offset, unsigned size)
+         case DEVID_AUX:
+             ret = 0x10000;
+             break;
++        case DEVID_USB:
++            ret = 0x100000;
++            break;
+         }
+         break;
+     }
+@@ -207,19 +245,15 @@ static void bdif_write(void *opaque, hwaddr offset,
+                        uint64_t value, unsigned size)
+ {
+     VMAppleBdifState *s = opaque;
+-    uint64_t devid = (offset & REG_DEVID_MASK);
++    uint64_t devid = offset & REG_DEVID_MASK;
++    BlockBackend *blk = bdif_backend_for_devid(s, devid);
+ 
+     trace_bdif_write(offset, size, value);
+ 
+     switch (offset & ~REG_DEVID_MASK) {
+     case REG_CMD:
+-        switch (devid) {
+-        case DEVID_ROOT:
+-            vblk_cmd(devid, s->root, value, 0x0);
+-            break;
+-        case DEVID_AUX:
+-            vblk_cmd(devid, s->aux, value, 0x0);
+-            break;
++        if (blk) {
++            vblk_cmd(devid, blk, value, 0x0);
+         }
+         break;
+     }
+@@ -248,6 +283,7 @@ static void bdif_init(Object *obj)
+ static const Property bdif_properties[] = {
+     DEFINE_PROP_DRIVE("aux", VMAppleBdifState, aux),
+     DEFINE_PROP_DRIVE("root", VMAppleBdifState, root),
++    DEFINE_PROP_DRIVE("usb", VMAppleBdifState, usb),
+ };
+ 
+ static void bdif_class_init(ObjectClass *klass, const void *data)
+diff --git a/hw/vmapple/vmapple.c b/hw/vmapple/vmapple.c
+index 643591c8c4..81ebad14f5 100644
+--- a/hw/vmapple/vmapple.c
++++ b/hw/vmapple/vmapple.c
+@@ -138,6 +138,7 @@ static void create_bdif(VMAppleMachineState *vms, MemoryRegion *mem)
+     SysBusDevice *bdif_sb;
+     DriveInfo *di_aux = drive_get(IF_PFLASH, 0, 0);
+     DriveInfo *di_root = drive_get(IF_PFLASH, 0, 1);
++    DriveInfo *di_usb = drive_get(IF_PFLASH, 0, 2);
+ 
+     if (!di_aux) {
+         error_report("No AUX device. Please specify one as pflash drive.");
+@@ -160,7 +161,11 @@ static void create_bdif(VMAppleMachineState *vms, MemoryRegion *mem)
+ 
+     qdev_prop_set_drive(DEVICE(bdif), "aux", blk_by_legacy_dinfo(di_aux));
+     qdev_prop_set_drive(DEVICE(bdif), "root", blk_by_legacy_dinfo(di_root));
++    if (di_usb) {
++        qdev_prop_set_drive(DEVICE(bdif), "usb",
++                            blk_by_legacy_dinfo(di_usb));
++    }
+ 
+     sysbus_realize_and_unref(bdif_sb, &error_fatal);
+ }
+ 
+-- 
+2.51.0

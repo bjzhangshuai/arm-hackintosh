@@ -1,0 +1,89 @@
+From ffe13eebaa1d6a061c74a530184b350d73510bcb Mon Sep 17 00:00:00 2001
+From: MacVM Project <macvm@localhost>
+Date: Tue, 1 Sep 2026 15:58:00 +0800
+Subject: [PATCH] target/arm: allow opt-in implementation-defined EL1 sysregs
+
+Apple implementation-defined system registers do not follow the architectural
+op1-to-minimum-EL mapping used by CheckSystemAccess().  VMApple guests read
+several op1=4/6 error status encodings at EL1.  QEMU currently asserts during
+registration if their actual EL1 access rights are described.
+
+Add an explicit ARM_CP_IMPLDEF_EL1 flag which makes the reginfo access mask
+authoritative for this narrow case, and mark only the six vmapple TCG error
+status registers.  The generic architectural validation remains unchanged for
+every unmarked register; unlike the reference fork, this does not globally
+lower op1=1..6 permissions.
+---
+ hw/vmapple/vmapple.c | 18 ++++++++++++------
+ target/arm/cpregs.h  |  6 ++++++
+ target/arm/helper.c  |  3 ++-
+ 3 files changed, 20 insertions(+), 7 deletions(-)
+
+diff --git a/target/arm/cpregs.h b/target/arm/cpregs.h
+--- a/target/arm/cpregs.h
++++ b/target/arm/cpregs.h
+@@ -153,6 +153,12 @@ enum {
+      * ARM pseudocode function CheckFPMREnabled().
+      */
+     ARM_CP_FPMR                  = 1 << 23,
++    /*
++     * Flag: implementation-defined register whose declared access mask is
++     * authoritative even when its opc1 encoding implies a higher minimum EL.
++     * This is required for Apple implementation-defined EL1 registers.
++     */
++    ARM_CP_IMPLDEF_EL1           = 1 << 24,
+ };
+ 
+ /*
+diff --git a/target/arm/helper.c b/target/arm/helper.c
+--- a/target/arm/helper.c
++++ b/target/arm/helper.c
+@@ -7979,7 +7979,8 @@ void define_one_arm_cp_reg_with_opaque(ARMCPU *cpu,
+      * here that the reginfo's specified permissions are strict enough
+      * to encompass the generic architectural permission check.
+      */
+-    if (r->state != ARM_CP_STATE_AA32) {
++    if (r->state != ARM_CP_STATE_AA32 &&
++        !(r->type & ARM_CP_IMPLDEF_EL1)) {
+         CPAccessRights mask;
+         switch (r->opc1) {
+         case 0:
+diff --git a/hw/vmapple/vmapple.c b/hw/vmapple/vmapple.c
+--- a/hw/vmapple/vmapple.c
++++ b/hw/vmapple/vmapple.c
+@@ -530,21 +530,27 @@ static const ARMCPRegInfo vmapple_tcg_error_status_regs[] = {
+     { .name = "VMAPPLE_MMU_ERR_STS", .state = ARM_CP_STATE_AA64,
+       .opc0 = 3, .opc1 = 6, .crn = 15, .crm = 0, .opc2 = 0,
+-      .access = PL1_R, .type = ARM_CP_CONST, .resetvalue = 0 },
++      .access = PL1_R,
++      .type = ARM_CP_CONST | ARM_CP_IMPLDEF_EL1, .resetvalue = 0 },
+     { .name = "VMAPPLE_LLC_ERR_STS", .state = ARM_CP_STATE_AA64,
+       .opc0 = 3, .opc1 = 3, .crn = 15, .crm = 8, .opc2 = 0,
+-      .access = PL1_R, .type = ARM_CP_CONST, .resetvalue = 0 },
++      .access = PL1_R,
++      .type = ARM_CP_CONST | ARM_CP_IMPLDEF_EL1, .resetvalue = 0 },
+     { .name = "VMAPPLE_LLC_ERR_ADR", .state = ARM_CP_STATE_AA64,
+       .opc0 = 3, .opc1 = 3, .crn = 15, .crm = 9, .opc2 = 0,
+-      .access = PL1_R, .type = ARM_CP_CONST, .resetvalue = 0 },
++      .access = PL1_R,
++      .type = ARM_CP_CONST | ARM_CP_IMPLDEF_EL1, .resetvalue = 0 },
+     { .name = "VMAPPLE_LLC_ERR_INF", .state = ARM_CP_STATE_AA64,
+       .opc0 = 3, .opc1 = 3, .crn = 15, .crm = 10, .opc2 = 0,
+-      .access = PL1_R, .type = ARM_CP_CONST, .resetvalue = 0 },
++      .access = PL1_R,
++      .type = ARM_CP_CONST | ARM_CP_IMPLDEF_EL1, .resetvalue = 0 },
+     { .name = "VMAPPLE_LSU_ERR_STS", .state = ARM_CP_STATE_AA64,
+       .opc0 = 3, .opc1 = 3, .crn = 15, .crm = 0, .opc2 = 0,
+-      .access = PL1_R, .type = ARM_CP_CONST, .resetvalue = 0 },
++      .access = PL1_R,
++      .type = ARM_CP_CONST | ARM_CP_IMPLDEF_EL1, .resetvalue = 0 },
+     { .name = "VMAPPLE_FED_ERR_STS", .state = ARM_CP_STATE_AA64,
+       .opc0 = 3, .opc1 = 4, .crn = 15, .crm = 0, .opc2 = 0,
+-      .access = PL1_R, .type = ARM_CP_CONST, .resetvalue = 0 },
++      .access = PL1_R,
++      .type = ARM_CP_CONST | ARM_CP_IMPLDEF_EL1, .resetvalue = 0 },
+ };
+ 
+ static void vmapple_register_tcg_error_status_regs(ARMCPU *cpu)
+-- 
+2.51.0

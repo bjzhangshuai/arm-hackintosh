@@ -1,0 +1,107 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@example.com>
+Date: Tue, 1 Sep 2026 08:08:00 +0800
+Subject: [PATCH] hw/vmapple: handle USB restore outbound packets
+
+iBEC's restore transport uses single-descriptor packets in both directions.  A
+host-to-iBEC receive descriptor carries flags 0x00020001 and a large capacity.
+The response path then posts a host-output descriptor with flags 0x00000001 and
+the actual packet length, such as the 2-byte response emitted after an incoming
+type-2 event.
+
+Do not run those outbound packets through the aux/root sector decoder.  Copy the
+packet from guest memory, trace it, and report the command as consumed.  A later
+patch can route the same bytes to a chardev/socket backed restore service; this
+step first fixes the root-cause misclassification.
+
+Signed-off-by: Codex <codex@example.com>
+---
+ hw/vmapple/bdif.c | 41 +++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 41 insertions(+)
+
+diff --git a/hw/vmapple/bdif.c b/hw/vmapple/bdif.c
+index 0000000000..0000000000 100644
+--- a/hw/vmapple/bdif.c
++++ b/hw/vmapple/bdif.c
+@@ -83,6 +83,7 @@ typedef struct VblkReq {
+ 
+ #define VBLK_USB_RESTORE_FLAGS 0x00020001
+ #define VBLK_USB_RESTORE_MAX_PACKET (16 * MiB)
++#define VBLK_USB_RESTORE_OUT_FLAGS 0x00000001
+ 
+ static bool bdif_is_usb_restore_transfer(uint64_t devid, const VblkReq *req)
+ {
+@@ -101,6 +102,21 @@ static bool bdif_is_usb_restore_transfer(uint64_t devid, const VblkReq *req)
+            req->retval.flags == 0;
+ }
+ 
++static bool bdif_is_usb_restore_out_packet(uint64_t devid, const VblkReq *req)
++{
++    if (devid != DEVID_USB) {
++        return false;
++    }
++
++    return req->sector.addr &&
++           req->sector.len &&
++           req->sector.flags == VBLK_USB_RESTORE_OUT_FLAGS &&
++           req->data.addr == 0 && req->data.len == 0 &&
++           req->data.flags == 0 &&
++           req->retval.addr == 0 && req->retval.len == 0 &&
++           req->retval.flags == 0;
++}
++
+ static int bdif_hex_value(char ch)
+ {
+     if (ch >= '0' && ch <= '9') {
+@@ -184,6 +198,37 @@ static bool bdif_usb_restore_deliver_first_packet(VMAppleBdifState *s,
+     return true;
+ }
+ 
++static void bdif_usb_restore_handle_out_packet(const VblkReq *req,
++                                               uint64_t gp_addr,
++                                               uint64_t guest_pc)
++{
++    g_autofree uint8_t *packet = NULL;
++    uint64_t header = 0;
++    MemTxResult dma_result;
++
++    if (req->sector.len > VBLK_USB_RESTORE_MAX_PACKET) {
++        trace_bdif_vblk_error("usb", "usb-restore-out-capacity", gp_addr,
++                              req->sector.len, VBLK_USB_RESTORE_MAX_PACKET,
++                              guest_pc);
++        return;
++    }
++
++    packet = g_malloc0(req->sector.len);
++    dma_result = dma_memory_read(&address_space_memory, req->sector.addr,
++                                 packet, req->sector.len,
++                                 MEMTXATTRS_UNSPECIFIED);
++    if (dma_result != MEMTX_OK) {
++        trace_bdif_vblk_error("usb", "usb-restore-out-dma", gp_addr,
++                              req->sector.addr, dma_result, guest_pc);
++        return;
++    }
++
++    memcpy(&header, packet, MIN((size_t)req->sector.len, sizeof(header)));
++    trace_bdif_usb_restore_packet("guest-out", req->sector.addr,
++                                  req->sector.len, req->sector.len, header,
++                                  guest_pc);
++}
++
+ static BlockBackend *bdif_backend_for_devid(VMAppleBdifState *s,
+                                             uint64_t devid)
+ {
+@@ -373,6 +408,11 @@ static void vblk_cmd(VMAppleBdifState *s, uint64_t devid, BlockBackend *blk,
+         return;
+     }
+ 
++    if (bdif_is_usb_restore_out_packet(devid, &req)) {
++        bdif_usb_restore_handle_out_packet(&req, gp_addr, guest_pc);
++        return;
++    }
++
+     if (req.sector.len != sizeof(sector)) {
+         trace_bdif_vblk_error(bdif_devid_name(devid), "sector-len", gp_addr,
+                               req.sector.len, sizeof(sector), guest_pc);
+-- 
+2.50.1

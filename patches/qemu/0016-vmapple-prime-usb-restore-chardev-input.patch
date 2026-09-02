@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@example.com>
+Date: Tue, 1 Sep 2026 10:22:00 +0800
+Subject: [PATCH] hw/vmapple: prime USB restore chardev input
+
+The first chardev smoke test connected the restore socket and wrote the
+host-to-iBEC event packet, but no restore packet reached the BDIF trace stream
+before the run timed out.  Prime the chardev frontend immediately after
+installing its handlers so a socket client that connected early can be drained.
+
+Also trace every host packet fragment that the chardev callback receives.  That
+keeps the next restore-transport failure diagnosable even when iBEC has not yet
+posted its receive descriptor and the packet is only queued in QEMU.
+
+Signed-off-by: Codex <codex@example.com>
+---
+ hw/vmapple/bdif.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/hw/vmapple/bdif.c b/hw/vmapple/bdif.c
+index 0000000000..0000000000 100644
+--- a/hw/vmapple/bdif.c
++++ b/hw/vmapple/bdif.c
+@@ -429,6 +429,7 @@ static void bdif_usb_restore_chr_read(void *opaque, const uint8_t *buf,
+ {
+     VMAppleBdifState *s = opaque;
+     uint64_t guest_pc = bdif_guest_pc();
++    uint64_t header = 0;
+ 
+     if (size <= 0) {
+         return;
+@@ -449,6 +450,10 @@ static void bdif_usb_restore_chr_read(void *opaque, const uint8_t *buf,
+     }
+ 
+     g_byte_array_append(s->usb_restore_rx, buf, size);
++    memcpy(&header, buf, MIN((size_t)size, sizeof(header)));
++    trace_bdif_usb_restore_packet("chardev-buffered", 0,
++                                  VBLK_USB_RESTORE_MAX_PACKET,
++                                  (uint32_t)size, header, guest_pc);
+     bdif_usb_restore_try_deliver_rx(s, guest_pc);
+     qemu_chr_fe_accept_input(&s->usb_restore_chr);
+ }
+@@ -729,6 +737,7 @@ static void bdif_realize(DeviceState *dev, Error **errp)
+                                  bdif_usb_restore_chr_can_read,
+                                  bdif_usb_restore_chr_read, NULL, NULL,
+                                  s, NULL, true);
++        qemu_chr_fe_accept_input(&s->usb_restore_chr);
+     }
+ }
+ 
+-- 
+2.50.1

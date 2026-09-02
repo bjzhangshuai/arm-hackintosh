@@ -1,0 +1,125 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@example.com>
+Date: Tue, 1 Sep 2026 04:02:00 +0800
+Subject: [PATCH] hw/vmapple: map optional iBoot low scratch RAM
+
+macOS restore iBEC initializes an internal exception/log ring from a low
+physical address window at 0x004fc000..0x00500000.  The vmapple model maps
+firmware at 0x00100000, cfg at 0x00400000, and normal RAM at 0x70000000, so
+that 16 KiB low scratch window remains unmapped on the Linux TCG path.  The
+guest later stores through the ring current pointer and takes a data abort at
+0x004ffff8.
+
+Expose an opt-in machine property that maps this 16 KiB window as RAM.  Keep
+the default off so existing vmapple behavior is unchanged.
+
+Signed-off-by: Codex <codex@example.com>
+---
+ hw/vmapple/vmapple.c | 52 +++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 52 insertions(+)
+
+diff --git a/hw/vmapple/vmapple.c b/hw/vmapple/vmapple.c
+index 0000000000..0000000000 100644
+--- a/hw/vmapple/vmapple.c
++++ b/hw/vmapple/vmapple.c
+@@ -65,6 +65,8 @@ struct VMAppleMachineState {
+     Notifier powerdown_notifier;
+     PCIBus *bus;
+     bool svc_a0_psci;
++    bool iboot_low_scratch;
++    MemoryRegion iboot_low_scratch_mr;
+     MemoryRegion fw_mr;
+     MemoryRegion ecam_alias;
+     uint64_t uuid;
+@@ -80,6 +82,7 @@ enum {
+     VMAPPLE_FIRMWARE,
+     VMAPPLE_CONFIG,
++    VMAPPLE_IBOOT_LOW_SCRATCH,
+     VMAPPLE_MEM,
+     VMAPPLE_GIC_DIST,
+     VMAPPLE_GIC_REDIST,
+     VMAPPLE_UART,
+@@ -101,6 +104,7 @@ static const MemMapEntry memmap[] = {
+ static const MemMapEntry memmap[] = {
+     [VMAPPLE_FIRMWARE] =           { 0x00100000, 0x00100000 },
+     [VMAPPLE_CONFIG] =             { 0x00400000, 0x00010000 },
++    [VMAPPLE_IBOOT_LOW_SCRATCH] =  { 0x004fc000, 0x00004000 },
+ 
+     [VMAPPLE_GIC_DIST] =           { 0x10000000, 0x00010000 },
+     [VMAPPLE_GIC_REDIST] =         { 0x10010000, 0x00400000 },
+@@ -205,4 +209,25 @@ static bool create_cfg(VMAppleMachineState *vms, MemoryRegion *mem,
+     return true;
+ }
+ 
++static void create_iboot_low_scratch(VMAppleMachineState *vms,
++                                     MemoryRegion *sysmem)
++{
++    hwaddr base = vms->memmap[VMAPPLE_IBOOT_LOW_SCRATCH].base;
++    hwaddr size = vms->memmap[VMAPPLE_IBOOT_LOW_SCRATCH].size;
++
++    if (!vms->iboot_low_scratch) {
++        return;
++    }
++
++    /*
++     * macOS restore iBEC uses the top 8 bytes of this 16 KiB low window as
++     * the first entry in an internal exception/log ring.  Without a mapped
++     * backing region the write to 0x004ffff8 raises a data abort before the
++     * restore path can continue.
++     */
++    memory_region_init_ram(&vms->iboot_low_scratch_mr, NULL,
++                           "vmapple.iboot-low-scratch", size, &error_fatal);
++    memory_region_add_subregion(sysmem, base, &vms->iboot_low_scratch_mr);
++}
++
+ static void create_gfx(VMAppleMachineState *vms, MemoryRegion *mem)
+@@ -499,6 +524,7 @@ static void mach_vmapple_init(MachineState *machine)
+ 
+     memory_region_add_subregion(sysmem, vms->memmap[VMAPPLE_MEM].base,
+                                 machine->ram);
++    create_iboot_low_scratch(vms, sysmem);
+ 
+     create_gic(vms, sysmem);
+     create_bdif(vms, sysmem);
+@@ -641,6 +667,24 @@ static void vmapple_set_svc_a0_psci(Object *obj, bool value, Error **errp)
+     vms->svc_a0_psci = value;
+ }
+ 
++static bool vmapple_get_iboot_low_scratch(Object *obj, Error **errp)
++{
++    VMAppleMachineState *vms = VMAPPLE_MACHINE(obj);
++
++    return vms->iboot_low_scratch;
++}
++
++static void vmapple_set_iboot_low_scratch(Object *obj, bool value,
++                                          Error **errp)
++{
++    VMAppleMachineState *vms = VMAPPLE_MACHINE(obj);
++
++    /*
++     * Default false keeps the upstream vmapple memory map unchanged.
++     */
++    vms->iboot_low_scratch = value;
++}
++
+ static void vmapple_instance_init(Object *obj)
+ {
+     VMAppleMachineState *vms = VMAPPLE_MACHINE(obj);
+@@ -656,6 +700,14 @@ static void vmapple_instance_init(Object *obj)
+         obj,
+         "svc-a0-psci",
+         "Route Apple iBoot SVC #0xa0 PSCI calls to QEMU PSCI; default off");
++    object_property_add_bool(obj, "iboot-low-scratch",
++                             vmapple_get_iboot_low_scratch,
++                             vmapple_set_iboot_low_scratch);
++    object_property_set_description(
++        obj,
++        "iboot-low-scratch",
++        "Map 16 KiB low scratch RAM at 0x004fc000 for restore iBoot; "
++        "default off");
+     object_property_add_uint64_ptr(obj, "uuid", &vms->uuid,
+                                    OBJ_PROP_FLAG_READWRITE);
+     object_property_set_description(obj, "uuid", "Machine UUID (SDOM)");
+-- 
+2.50.1

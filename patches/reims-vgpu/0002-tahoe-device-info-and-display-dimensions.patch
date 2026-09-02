@@ -1,0 +1,176 @@
+From: MacVM validation <macvm@validation.invalid>
+Subject: [PATCH 2/3] reims: make Tahoe display capabilities self-consistent
+
+Tahoe is the first guest in this validation path to consume device-info keys 37
+and 44 and the negotiated floating-point physical dimensions. Advertise Apple9
+consistently (Apple5..Apple9, not Apple10), use a 16:9 physical panel beside the
+1920x1080 native mode, and populate both licensed dimension encodings.
+---
+ crates/reims-vgpu/src/model/regs.rs         | 48 ++++++++++++++++++++++++--
+ crates/reims-vgpu/src/runtime/drain/mod.rs  | 10 ++++--
+ crates/reims-vgpu/src/runtime/drain/tests.rs | 27 +++++++++++++++
+ 3 files changed, 80 insertions(+), 5 deletions(-)
+
+diff --git a/crates/reims-vgpu/src/model/regs.rs b/crates/reims-vgpu/src/model/regs.rs
+index 8fac011..cd079a5 100644
+--- a/crates/reims-vgpu/src/model/regs.rs
++++ b/crates/reims-vgpu/src/model/regs.rs
+@@ -249,6 +249,9 @@ pub const DISPLAY_DESC_INDEX: u64 = 0x12;
+ pub const DISPLAY_DESC_WIDTH_MM: u64 = 0x14;
+ pub const DISPLAY_DESC_HEIGHT_MM: u64 = 0x16;
+ pub const DISPLAY_DESC_FEATURES: u64 = 0x1c;
++/// f32 encodings licensed by the negotiated displayDimensionFloats feature.
++pub const DISPLAY_DESC_WIDTH_MM_F32: u64 = 0x24;
++pub const DISPLAY_DESC_HEIGHT_MM_F32: u64 = 0x28;
+ /// Timing-element **count** (not a pixel width — large values hang the guest).
+ pub const DISPLAY_DESC_TIMING_COUNT: u64 = 0x208;
+ 
+@@ -268,7 +271,27 @@ pub const DISPLAY_MODE3_W: u16 = 3840;
+ pub const DISPLAY_MODE3_H: u16 = 2160;
+ pub const DISPLAY_SERIAL_NUMBER: u32 = 1;
+-pub const DISPLAY_WIDTH_MM: u16 = 400;
+-pub const DISPLAY_HEIGHT_MM: u16 = 300;
++/// Physical panel size: 48 x 27 cm is exactly 16:9 and about 102 DPI at the
++/// native 1920x1080 mode. The guest places this in its synthesized EDID.
++pub const DISPLAY_WIDTH_MM: u16 = 480;
++pub const DISPLAY_HEIGHT_MM: u16 = 270;
++
++const _: () = assert!(
++    DISPLAY_WIDTH_MM as u64 * DISPLAY_MODE_EFI_H as u64
++        == DISPLAY_HEIGHT_MM as u64 * DISPLAY_MODE_EFI_W as u64,
++    "physical panel and native mode must have the same aspect"
++);
++const _: () = assert!(
++    DISPLAY_WIDTH_MM % 10 == 0 && DISPLAY_HEIGHT_MM % 10 == 0,
++    "the guest EDID stores physical size in whole centimetres"
++);
++
++/// Produce the two encodings of one physical dimension from one value. Apple
++/// narrows to f32 and rounds the narrowed value for the u16 representation.
++#[inline]
++pub fn display_dimension_mm(millimetres: u16) -> (f32, u16) {
++    let narrowed = millimetres as f32;
++    (narrowed, (narrowed + 0.5) as u16)
++}
+ /// Advertised refresh of every timing element. macOS paces CoreAnimation /
+ /// rAF to the display's advertised rate, so 60 here caps the guest at 60 fps
+ /// regardless of how fast VBL is signalled. 120 requests ProMotion-class
+@@ -467,13 +490,32 @@ pub const DEVICE_INFO_CAPS: &[(u32, u32)] = &[
+     (34, 8),
+     (35, 2048),
+     (36, 16),
+-    (37, 1009),
++    (37, DEVICE_INFO_GPU_FAMILY),
+     (40, 256),
+     (41, 7),
+     (42, 2),
+-    (44, 127),
++    (44, DEVICE_INFO_GPU_FAMILY_SET),
+ ];
+ 
++/// MTLGPUFamily.Apple1; Apple family ordinals are 1000 + n.
++pub const MTL_GPU_FAMILY_APPLE1: u32 = 1001;
++/// This device presents itself as Apple9.
++pub const DEVICE_INFO_GPU_FAMILY: u32 = 1009;
++/// Metal Apple families are cumulative. Key 44 bit zero is Apple5, so Apple9
++/// is exactly bits 0 through 4. Derive the set from key 37 to prevent drift.
++pub const DEVICE_INFO_GPU_FAMILY_SET: u32 =
++    (1u32 << (DEVICE_INFO_GPU_FAMILY - MTL_GPU_FAMILY_APPLE1 - 4 + 1)) - 1;
++const _: () = assert!(
++    DEVICE_INFO_GPU_FAMILY_SET
++        & (1 << (DEVICE_INFO_GPU_FAMILY - MTL_GPU_FAMILY_APPLE1 - 4))
++        != 0
++);
++const _: () = assert!(
++    DEVICE_INFO_GPU_FAMILY_SET
++        >> (DEVICE_INFO_GPU_FAMILY - MTL_GPU_FAMILY_APPLE1 - 3)
++        == 0
++);
++
+ #[inline]
+ pub fn child_reg_block_offset(channel_id: u32) -> Option<u64> {
+     if channel_id == 0 || channel_id as usize >= MAX_CHANNELS {
+@@ -538,6 +580,16 @@ mod tests {
+     /// and nothing else.
+     const VERSION_WITH_DUAL_PLANE: u32 = 31;
+ 
++    #[test]
++    fn tahoe_family_set_matches_the_single_advertised_family() {
++        assert_eq!(DEVICE_INFO_GPU_FAMILY, 1009);
++        assert_eq!(DEVICE_INFO_GPU_FAMILY_SET, 0b1_1111);
++        let caps: std::collections::BTreeMap<u32, u32> =
++            DEVICE_INFO_CAPS.iter().copied().collect();
++        assert_eq!(caps[&37], DEVICE_INFO_GPU_FAMILY);
++        assert_eq!(caps[&44], DEVICE_INFO_GPU_FAMILY_SET);
++    }
++
+     #[test]
+     fn a_more_capable_host_never_raises_a_device_info_answer() {
+         let generous = DeviceInfoLimits {
+diff --git a/crates/reims-vgpu/src/runtime/drain/mod.rs b/crates/reims-vgpu/src/runtime/drain/mod.rs
+index 825f734..6939ef3 100644
+--- a/crates/reims-vgpu/src/runtime/drain/mod.rs
++++ b/crates/reims-vgpu/src/runtime/drain/mod.rs
+@@ -1207,8 +1207,12 @@ fn fill_display_descriptor<H: HostMemory + HostOps>(
+         psz,
+     );
+     shared_w16(host, gpa, DISPLAY_DESC_INDEX, index as u16, psz);
+-    shared_w16(host, gpa, DISPLAY_DESC_WIDTH_MM, DISPLAY_WIDTH_MM, psz);
+-    shared_w16(host, gpa, DISPLAY_DESC_HEIGHT_MM, DISPLAY_HEIGHT_MM, psz);
++    let (width_f32, width_mm) = display_dimension_mm(DISPLAY_WIDTH_MM);
++    let (height_f32, height_mm) = display_dimension_mm(DISPLAY_HEIGHT_MM);
++    shared_w16(host, gpa, DISPLAY_DESC_WIDTH_MM, width_mm, psz);
++    shared_w16(host, gpa, DISPLAY_DESC_HEIGHT_MM, height_mm, psz);
++    shared_w32(host, gpa, DISPLAY_DESC_WIDTH_MM_F32, width_f32.to_bits(), psz);
++    shared_w32(host, gpa, DISPLAY_DESC_HEIGHT_MM_F32, height_f32.to_bits(), psz);
+     shared_w32(host, gpa, DISPLAY_DESC_FEATURES, 0, psz);
+ 
+     // HW cursor capability so the guest doorbells glyph/show/move.
+diff --git a/crates/reims-vgpu/src/runtime/drain/tests.rs b/crates/reims-vgpu/src/runtime/drain/tests.rs
+index aabefec..a4db44e 100644
+--- a/crates/reims-vgpu/src/runtime/drain/tests.rs
++++ b/crates/reims-vgpu/src/runtime/drain/tests.rs
+@@ -176,6 +176,15 @@ fn display_descriptor_advertises_four_modes_incl_4k() {
+         host.read_gpa(gpa + off, &mut b).unwrap();
+         u16::from_le_bytes(b)
+     };
++    let read32 = |host: &mut FakeHost, off: u64| {
++        let mut b = [0u8; 4];
++        host.read_gpa(gpa + off, &mut b).unwrap();
++        u32::from_le_bytes(b)
++    };
++    assert_eq!(read16(&mut host, DISPLAY_DESC_WIDTH_MM), 480);
++    assert_eq!(read16(&mut host, DISPLAY_DESC_HEIGHT_MM), 270);
++    assert_eq!(f32::from_bits(read32(&mut host, DISPLAY_DESC_WIDTH_MM_F32)), 480.0);
++    assert_eq!(f32::from_bits(read32(&mut host, DISPLAY_DESC_HEIGHT_MM_F32)), 270.0);
+     // Element 0 (native/preferred) stays 1920×1080; 4K is appended last so
+     // boot resolution is unchanged. Stride 0x10 from base 0x210.
+     assert_eq!(read16(&mut host, 0x210), 1920);
+@@ -190,6 +199,25 @@ fn display_descriptor_advertises_four_modes_incl_4k() {
+     assert_eq!(u32::from_le_bytes(refresh), DISPLAY_REFRESH_HZ << 16);
+ }
+ 
++#[test]
++fn physical_dimensions_keep_integer_float_and_native_aspect_in_sync() {
++    for mm in [DISPLAY_WIDTH_MM, DISPLAY_HEIGHT_MM] {
++        let (as_f32, as_u16) = display_dimension_mm(mm);
++        assert_eq!(as_f32, mm as f32);
++        assert_eq!(as_u16, mm);
++    }
++    assert_eq!(
++        u64::from(DISPLAY_WIDTH_MM) * u64::from(DISPLAY_MODE_EFI_H),
++        u64::from(DISPLAY_HEIGHT_MM) * u64::from(DISPLAY_MODE_EFI_W)
++    );
++    // About 102 DPI in both axes: ordinary desktop density, not HiDPI.
++    let dpi_x10 = |px: u16, mm: u16| u64::from(px) * 254 / u64::from(mm);
++    assert_eq!(
++        dpi_x10(DISPLAY_MODE_EFI_W, DISPLAY_WIDTH_MM),
++        dpi_x10(DISPLAY_MODE_EFI_H, DISPLAY_HEIGHT_MM)
++    );
++}
++
+ #[test]
+ fn present_page_identity_reports_alias_and_disjoint_peers() {
+     use crate::contract::iosurface_pages::{PAGE_ENTRY_PFN_SHIFT, PAGE_ENTRY_VALID};
+-- 
+2.43.0

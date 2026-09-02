@@ -1,0 +1,271 @@
+From: MacVM validation <macvm@validation.invalid>
+Subject: [PATCH 3/3] reims: signal the refresh class selected by the guest
+
+Different AppleParavirtDisplay generations arm different completion classes in
+the same shared enable word. Signal VBL, transaction/present, or both according
+to that live word. Share the exact implementation with the contended poll path
+and carry the guest page size in its lock-free snapshot.
+---
+ crates/reims-vgpu/src/lib.rs                    | 47 ++++++------------
+ crates/reims-vgpu/src/runtime/drain/mod.rs      | 61 ++++++++++++++++++-------
+ crates/reims-vgpu/src/runtime/drain/tests.rs    | 43 +++++++++++++++++
+ 3 files changed, 103 insertions(+), 48 deletions(-)
+
+diff --git a/crates/reims-vgpu/src/runtime/drain/mod.rs b/crates/reims-vgpu/src/runtime/drain/mod.rs
+index 6939ef3..07c9e10 100644
+--- a/crates/reims-vgpu/src/runtime/drain/mod.rs
++++ b/crates/reims-vgpu/src/runtime/drain/mod.rs
+@@ -4896,6 +4896,55 @@ fn take_store_routes() -> Option<String> {
+     Some(out)
+ }
+ 
++/// Signal every refresh-completion class currently armed by the guest. Apple
++/// display generations disagree on whether VBL (bit 0) or transaction/present
++/// (bit 1) retires the live frame, so the shared enable word is authoritative.
++/// One read-modify-write and one IRQ serve either or both classes.
++pub(crate) fn signal_display_refresh_classes<H: HostMemory + HostOps>(
++    host: &mut H,
++    gpa: u64,
++    display_index: u32,
++    interrupt_status_disp: &std::sync::atomic::AtomicU32,
++    page_size: usize,
++    now_ms: u64,
++) {
++    let mut enable_le = [0u8; 4];
++    if host
++        .read_gpa(gpa + DISPLAY_SHARED_ENABLE_MASK, &mut enable_le)
++        .is_err()
++    {
++        note_vbl(VBL_NOT_ENABLED, now_ms);
++        return;
++    }
++    let requested = ld32(&enable_le) & (DISPLAY_VBL_EVENT_MASK | DISPLAY_PRESENT_EVENT_MASK);
++    if requested == 0 {
++        note_vbl(VBL_NOT_ENABLED, now_ms);
++        return;
++    }
++    note_vbl(VBL_DELIVERED, now_ms);
++
++    let mut pending_le = [0u8; 4];
++    let pending = if host
++        .read_gpa(gpa + DISPLAY_SHARED_PENDING, &mut pending_le)
++        .is_ok()
++    {
++        ld32(&pending_le)
++    } else {
++        0
++    };
++    let stale_online = pending & DISPLAY_ONLINE_EVENT_MASK != 0;
++    let next = (pending & !DISPLAY_ONLINE_EVENT_MASK) | requested;
++    shared_w32(host, gpa, DISPLAY_SHARED_PENDING, next, page_size);
++    if stale_online {
++        crate::runtime::census::present_proxy::note_stale_online_pending("refresh", pending);
++    }
++    interrupt_status_disp.fetch_or(
++        1u32 << (display_index & 0x1f),
++        std::sync::atomic::Ordering::AcqRel,
++    );
++    host.enqueue(HostAction::irq_gfx());
++}
++
+ fn signal_display_vbl_at<H: HostMemory + HostOps>(
+     state: &mut DeviceState,
+     host: &mut H,
+@@ -4916,43 +4965,14 @@ fn signal_display_vbl_at<H: HostMemory + HostOps>(
+         note_vbl(VBL_NOT_CLAIMED, now_ms);
+         return;
+     }
+-    note_vbl(VBL_DELIVERED, now_ms);
+-    let gpa = state.display.shared_gpa;
+-    let mut pending_le = [0u8; 4];
+-    let pending = if host
+-        .read_gpa(gpa + DISPLAY_SHARED_PENDING, &mut pending_le)
+-        .is_ok()
+-    {
+-        ld32(&pending_le)
+-    } else {
+-        0
+-    };
+-    // Drop a stale (already-acked) ONLINE bit so we don't re-deliver it and make
+-    // the guest re-run process_online → connectionChange → overlay rebuild (see
+-    // signal_display_present_complete). signal_display_vbl only runs post-ack, so
+-    // online_acked is already true here; `stale` is 0 on healthy boots (no-op).
+-    let stale = state.display.online_acked && pending & DISPLAY_ONLINE_EVENT_MASK != 0;
+-    let base = if stale {
+-        pending & !DISPLAY_ONLINE_EVENT_MASK
+-    } else {
+-        pending
+-    };
+-    shared_w32(
++    signal_display_refresh_classes(
+         host,
+-        gpa,
+-        DISPLAY_SHARED_PENDING,
+-        base | DISPLAY_VBL_EVENT_MASK,
++        state.display.shared_gpa,
++        state.display.display_index,
++        &state.gfx.interrupt_status_disp,
+         state.page_size() as usize,
++        now_ms,
+     );
+-    if stale {
+-        crate::runtime::census::present_proxy::note_stale_online_pending("vbl", pending);
+-    }
+-    let bit = 1u32 << (state.display.display_index & 0x1f);
+-    state
+-        .gfx
+-        .interrupt_status_disp
+-        .fetch_or(bit, std::sync::atomic::Ordering::AcqRel);
+-    host.enqueue(HostAction::irq_gfx());
+ }
+ 
+ /// Assert display ONLINE once the guest has published the enable mask.
+diff --git a/crates/reims-vgpu/src/runtime/drain/tests.rs b/crates/reims-vgpu/src/runtime/drain/tests.rs
+index a4db44e..4d60ab4 100644
+--- a/crates/reims-vgpu/src/runtime/drain/tests.rs
++++ b/crates/reims-vgpu/src/runtime/drain/tests.rs
+@@ -2561,6 +2561,10 @@ fn signal_display_vbl_after_online_uses_shared_time_limiter() {
+     state.display.shared_gpa = gpa;
+     state.display.display_index = 0;
+     state.display.online_acked = true;
++    let mut enable = [0u8; 4];
++    st32(&mut enable, DISPLAY_VBL_EVENT_MASK);
++    host.write_gpa(gpa + DISPLAY_SHARED_ENABLE_MASK, &enable)
++        .unwrap();
+ 
+     // Microseconds: the base must exceed one grid interval from the zero the
+     // limiter starts at, or the very first claim is refused as too early.
+@@ -2601,6 +2605,50 @@ fn signal_display_vbl_after_online_uses_shared_time_limiter() {
+     );
+ }
+ 
++#[test]
++fn refresh_tick_signals_exactly_the_classes_the_guest_armed() {
++    for (enable_mask, expected) in [
++        (DISPLAY_VBL_EVENT_MASK, DISPLAY_VBL_EVENT_MASK),
++        (DISPLAY_PRESENT_EVENT_MASK, DISPLAY_PRESENT_EVENT_MASK),
++        (
++            DISPLAY_VBL_EVENT_MASK | DISPLAY_PRESENT_EVENT_MASK,
++            DISPLAY_VBL_EVENT_MASK | DISPLAY_PRESENT_EVENT_MASK,
++        ),
++    ] {
++        let state = DeviceState::new(DeviceId(1), PAGE_SHIFT_ARM64E);
++        let mut host = FakeHost::new();
++        let gpa = 0x7c100000u64 + u64::from(enable_mask) * PAGE_SIZE_ARM64E;
++        host.map_range(gpa, PAGE_SIZE_ARM64E as usize, 0);
++        let mut enable = [0u8; 4];
++        st32(&mut enable, enable_mask);
++        host.write_gpa(gpa + DISPLAY_SHARED_ENABLE_MASK, &enable)
++            .unwrap();
++        signal_display_refresh_classes(
++            &mut host,
++            gpa,
++            0,
++            &state.gfx.interrupt_status_disp,
++            PAGE_SIZE_ARM64E as usize,
++            10_000,
++        );
++        let mut pending = [0u8; 4];
++        host.read_gpa(gpa + DISPLAY_SHARED_PENDING, &mut pending)
++            .unwrap();
++        assert_eq!(ld32(&pending), expected, "enable mask {enable_mask:#x}");
++        assert_eq!(host.actions.len(), 1, "one IRQ serves all armed classes");
++    }
++
++    let state = DeviceState::new(DeviceId(1), PAGE_SHIFT_ARM64E);
++    let mut host = FakeHost::new();
++    let gpa = 0x7c500000u64;
++    host.map_range(gpa, PAGE_SIZE_ARM64E as usize, 0);
++    signal_display_refresh_classes(
++        &mut host, gpa, 0, &state.gfx.interrupt_status_disp,
++        PAGE_SIZE_ARM64E as usize, 10_000,
++    );
++    assert!(host.actions.is_empty(), "an unarmed class must not be invented");
++}
++
+ /// The VBL limiter is phase-locked to a fixed interval grid so poll jitter
+ /// cannot alias the delivered rate down to ~60 Hz (the boot-to-boot fps split).
+ /// The VBL we deliver must be the refresh rate we advertise.
+diff --git a/crates/reims-vgpu/src/lib.rs b/crates/reims-vgpu/src/lib.rs
+index 1c4df98..01cf7e8 100644
+--- a/crates/reims-vgpu/src/lib.rs
++++ b/crates/reims-vgpu/src/lib.rs
+@@ -246,6 +246,8 @@ struct BoundDevice {
+     vbl_shared_gpa: AtomicU64,
+     vbl_display_index: AtomicU32,
+     vbl_online: AtomicBool,
++    /// Guest page size carried with the lock-free display snapshot.
++    vbl_page_size: AtomicU64,
+     /// Wall-clock ms of the last VBL claimed by either the locked or contended
+     /// poll path. One shared limiter keeps guest pacing independent of which
+     /// path happens to win the device lock.
+@@ -385,6 +387,7 @@ pub fn device_create(ops: Option<ReimsVgpuHostOps>, page_shift: u32) -> Option<u
+             vbl_shared_gpa: AtomicU64::new(0),
+             vbl_display_index: AtomicU32::new(0),
+             vbl_online: AtomicBool::new(false),
++            vbl_page_size: AtomicU64::new(0),
+             vbl_last_us: AtomicU64::new(0),
+             ops,
+             #[cfg(feature = "host-window")]
+@@ -1167,6 +1170,8 @@ pub fn device_poll(id: u64) -> bool {
+         .store(device.state.display.display_index, Ordering::Release);
+     slot.vbl_online
+         .store(device.state.display.online_acked, Ordering::Release);
++    slot.vbl_page_size
++        .store(device.state.page_size(), Ordering::Release);
+     // Census both source polls and the independently time-gated VBL rate.
+     // Drive the resident idle-drain off the poll heartbeat, which ticks even when
+     // the guest stops compositing (a static page means no publishes at all).
+@@ -1217,6 +1222,5 @@ pub fn device_poll(id: u64) -> bool {
+ /// than dropping ~90% of VBLs, which is the pre-fix behaviour under load.
+ fn vbl_contended_pulse(slot: &BoundDevice) {
+-    use crate::runtime::host::HostMemory;
+     let gpa = slot.vbl_shared_gpa.load(Ordering::Acquire);
+     let now = crate::observe::elapsed_ms() as u64;
+     if gpa == 0 || !slot.vbl_online.load(Ordering::Acquire) {
+@@ -1234,30 +1238,21 @@ fn vbl_contended_pulse(slot: &BoundDevice) {
+         runtime::drain::note_vbl(runtime::drain::VBL_NOT_CLAIMED, now);
+         return;
+     }
+-    runtime::drain::note_vbl(runtime::drain::VBL_DELIVERED, now);
++    let page_size = slot.vbl_page_size.load(Ordering::Acquire);
++    if page_size == 0 {
++        runtime::drain::note_vbl(runtime::drain::VBL_NOT_ONLINE, now);
++        return;
++    }
+     let mut scratch = VecDeque::new();
+     let mut host = QemuHost::new(&ops, &mut scratch, &slot.prompt_actions);
+-    let mut buf = [0u8; 4];
+-    if host
+-        .read_gpa(gpa + model::DISPLAY_SHARED_PENDING, &mut buf)
+-        .is_err()
+-    {
+-        return;
+-    }
+-    // ONLINE is acked here (vbl_online), so a lingering bit2 is stale — drop it
+-    // (mirrors signal_display_vbl's post-ack masking) and OR in the VBL bit.
+-    let pending = u32::from_le_bytes(buf);
+-    let next = (pending & !model::DISPLAY_ONLINE_EVENT_MASK) | model::DISPLAY_VBL_EVENT_MASK;
+-    if host
+-        .write_gpa(gpa + model::DISPLAY_SHARED_PENDING, &next.to_le_bytes())
+-        .is_err()
+-    {
+-        return;
+-    }
+-    let idx = slot.vbl_display_index.load(Ordering::Acquire);
+-    slot.intr_disp
+-        .fetch_or(1u32 << (idx & 0x1f), Ordering::AcqRel);
+-    host.enqueue(HostAction::irq_gfx());
++    runtime::drain::signal_display_refresh_classes(
++        &mut host,
++        gpa,
++        slot.vbl_display_index.load(Ordering::Acquire),
++        &slot.intr_disp,
++        page_size as usize,
++        now,
++    );
+ }
+ 
+ /// Pop one HostAction for the QEMU BH. Returns false if the queue is empty.
+-- 
+2.43.0

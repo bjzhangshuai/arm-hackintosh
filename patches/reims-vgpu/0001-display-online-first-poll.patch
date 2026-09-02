@@ -1,0 +1,90 @@
+From: MacVM validation <macvm@validation.invalid>
+Subject: [PATCH 1/3] reims: observe display enable on every poll
+
+Tahoe publishes the display enable bit immediately after shared-state setup.
+DISPLAY_ONLINE_POLL_DIVISOR is the retry cadence, not permission to delay the
+first observation by 50 polls. Read the mask every poll, assert the first ONLINE
+immediately, and retain the divisor for subsequent retries.
+---
+ crates/reims-vgpu/src/runtime/drain/mod.rs   | 10 ++++++----
+ crates/reims-vgpu/src/runtime/drain/tests.rs | 33 ++++++++++++++++++++++++++++
+ 2 files changed, 39 insertions(+), 4 deletions(-)
+
+diff --git a/crates/reims-vgpu/src/runtime/drain/mod.rs b/crates/reims-vgpu/src/runtime/drain/mod.rs
+index 4ddc107..825f734 100644
+--- a/crates/reims-vgpu/src/runtime/drain/mod.rs
++++ b/crates/reims-vgpu/src/runtime/drain/mod.rs
+@@ -4967,13 +4967,10 @@ pub fn try_display_online<H: HostMemory + HostOps>(state: &mut DeviceState, host
+     if state.display.online_tries >= DISPLAY_ONLINE_MAX_TRIES {
+         return;
+     }
+-    // Cadence: skip most ticks (archive divisor); still run often enough via
+-    // gfx_update / drain that enable() is observed within seconds.
++    // Observe enable() every poll. The divisor paces only retries; using it as
++    // the read cadence delayed the first ONLINE by 50 early-boot polls.
+     let ctr = state.display.poll_ctr.wrapping_add(1);
+     state.display.poll_ctr = ctr;
+-    if !ctr.is_multiple_of(DISPLAY_ONLINE_POLL_DIVISOR) {
+-        return;
+-    }
+     let gpa = state.display.shared_gpa;
+     let mut mask_le = [0u8; 4];
+     if host
+@@ -4986,6 +4984,10 @@ pub fn try_display_online<H: HostMemory + HostOps>(state: &mut DeviceState, host
+     if mask & DISPLAY_ONLINE_EVENT_MASK == 0 {
+         return;
+     }
++    // First pulse is immediate; only re-assertions use Apple's cadence.
++    if state.display.online_tries > 0 && !ctr.is_multiple_of(DISPLAY_ONLINE_POLL_DIVISOR) {
++        return;
++    }
+     // pending word is atomic read-and-clear on the guest side.
+     shared_w32(
+         host,
+diff --git a/crates/reims-vgpu/src/runtime/drain/tests.rs b/crates/reims-vgpu/src/runtime/drain/tests.rs
+index bf210db..aabefec 100644
+--- a/crates/reims-vgpu/src/runtime/drain/tests.rs
++++ b/crates/reims-vgpu/src/runtime/drain/tests.rs
+@@ -1656,6 +1656,40 @@ fn display_online_waits_for_enable_mask_then_signals() {
+     assert!(host.actions.is_empty());
+ }
+ 
++#[test]
++fn first_online_pulse_does_not_wait_for_retry_cadence() {
++    let mut state = DeviceState::new(DeviceId(1), PAGE_SHIFT_ARM64E);
++    let mut host = FakeHost::new();
++    let gpa = 0x7b100000u64;
++    host.map_range(gpa, PAGE_SIZE_ARM64E as usize, 0);
++    state.display.shared_gpa = gpa;
++    state.display.display_index = 0;
++    let mut mask = [0u8; 4];
++    st32(&mut mask, DISPLAY_ONLINE_EVENT_MASK);
++    host.write_gpa(gpa + DISPLAY_SHARED_ENABLE_MASK, &mask)
++        .unwrap();
++
++    // setupSharedState leaves both counters at zero. One poll must suffice.
++    assert_eq!(state.display.poll_ctr, 0);
++    assert_eq!(state.display.online_tries, 0);
++    try_display_online(&mut state, &mut host);
++    assert_eq!(state.display.online_tries, 1);
++    assert_eq!(host.actions.len(), 1);
++    assert_eq!(host.actions[0].kind, HostActionKind::IrqGfxPulse);
++
++    // The immediately following poll is not a retry boundary.
++    host.actions.clear();
++    try_display_online(&mut state, &mut host);
++    assert!(host.actions.is_empty());
++    assert_eq!(state.display.online_tries, 1);
++
++    // A later divisor boundary does re-assert while the guest has not acked.
++    state.display.poll_ctr = DISPLAY_ONLINE_POLL_DIVISOR - 1;
++    try_display_online(&mut state, &mut host);
++    assert_eq!(state.display.online_tries, 2);
++    assert_eq!(host.actions.len(), 1);
++}
++
+ /// Display-lifecycle instrumentation: SETUP_SHARED_STATE, ONLINE ack, and the
+ /// first ONLINE signal each leave an always-on line so a bad boot has a
+ /// display-lifecycle timeline to correlate with post_converge_regress. A
+-- 
+2.43.0

@@ -1,0 +1,33 @@
+From: MacVM Project <macvm@localhost>
+Subject: [PATCH] vmapple: match TCG counter to the Apple 24 MHz timebase
+
+Boot114 exposes a 1 GHz generic counter with -cpu max, while every signed
+DeviceTree CPU node and XNU's platform timebase use 24 MHz. This makes guest
+deadlines and accounting run approximately 41.67 times faster than intended.
+Set the TCG board counter frequency before CPU realization, including all
+secondary CPUs. Leave hardware virtualization counters unchanged.
+
+QEMU's existing integer-nanosecond timer scaling still rounds the 24 MHz
+period to 41 ns (about 1.63% residual drift). Do not change only counter reads:
+counter and timer expiry conversion must remain exact inverses. A future
+rational-scaling change requires separate timer/overflow/WFxT tests.
+
+diff --git a/hw/vmapple/vmapple.c b/hw/vmapple/vmapple.c
+--- a/hw/vmapple/vmapple.c
++++ b/hw/vmapple/vmapple.c
+@@ -638,6 +638,15 @@
+         cpu = object_new(possible_cpus->cpus[n].type);
+ 
++        /*
++         * Apple firmware describes a 24 MHz platform timebase. The TCG
++         * "max" CPU otherwise defaults to 1 GHz, making XNU's timekeeping
++         * and deadlines diverge from the actual counter rate.
++         */
++        if (tcg_enabled()) {
++            object_property_set_int(cpu, "cntfrq", 24000000, &error_fatal);
++        }
++
+         /* Must be registered before the CPU is realized. */
+         vmapple_register_tcg_error_status_regs(ARM_CPU(cpu));
+ 
+         object_property_set_int(cpu, "mp-affinity",

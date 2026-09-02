@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@example.com>
+Date: Tue, 1 Sep 2026 04:48:00 +0800
+Subject: [PATCH] hw/vmapple: report restore cfg for BDIF USB backend
+
+The macOS restore iBEC enumerates root and aux BDIF backends with cfg 0x2, then
+enumerates the restore USB backend with cfg 0x1a01.  Returning the generic
+REG_CFG_ACTIVE value for DEVID_USB makes the iBEC reject the USB device before
+it can read its capability fields or issue block commands.
+
+Return the restore cfg only for the optional DEVID_USB backend.  Root and aux
+keep their existing cfg value, and absent devices still report cfg 0.
+
+Signed-off-by: Codex <codex@example.com>
+---
+ hw/vmapple/bdif.c | 18 +++++++++++++++++-
+ 1 file changed, 17 insertions(+), 1 deletion(-)
+
+diff --git a/hw/vmapple/bdif.c b/hw/vmapple/bdif.c
+index 0000000000..0000000000 100644
+--- a/hw/vmapple/bdif.c
++++ b/hw/vmapple/bdif.c
+@@ -43,7 +43,8 @@ struct VMAppleBdifState {
+ #define REG_STATUS          0x0
+ #define REG_STATUS_ACTIVE     BIT(0)
+ #define REG_CFG             0x4
+-#define REG_CFG_ACTIVE        BIT(1)
++#define REG_CFG_ACTIVE        BIT(1)
++#define REG_CFG_USB_RESTORE   0x1a01
+ #define REG_UNK1            0x8
+ #define REG_BUSY            0x10
+ #define REG_BUSY_READY        BIT(0)
+@@ -91,6 +92,20 @@ static BlockBackend *bdif_backend_for_devid(VMAppleBdifState *s,
+     }
+ }
+ 
++static uint64_t bdif_cfg_for_devid(VMAppleBdifState *s, uint64_t devid)
++{
++    if (!bdif_backend_for_devid(s, devid)) {
++        return 0;
++    }
++
++    switch (devid) {
++    case DEVID_USB:
++        return REG_CFG_USB_RESTORE;
++    default:
++        return REG_CFG_ACTIVE;
++    }
++}
++
+ static const char *bdif_devid_name(uint64_t devid)
+ {
+     switch (devid) {
+@@ -156,7 +171,7 @@ static uint64_t bdif_read(void *opaque, hwaddr offset, unsigned size)
+         ret = present ? REG_STATUS_ACTIVE : 0;
+         break;
+     case REG_CFG:
+-        ret = present ? REG_CFG_ACTIVE : 0;
++        ret = bdif_cfg_for_devid(s, devid);
+         break;
+     case REG_UNK1:
+         ret = present ? 0x420 : 0;
+-- 
+2.50.1

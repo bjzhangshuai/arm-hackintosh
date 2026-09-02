@@ -1,0 +1,25 @@
+/build/*
+!/build/.gitkeep
+*.py[cod]
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.DS_Store
+
+# User-provided or generated guest assets must never be committed.
+*.ipsw
+*.dmg
+*.img
+*.qcow2
+*.raw
+*.fd
+AVPBooter
+guest/
+vm/
+
+# Backups retain sources, not private assets or compilation caches.
+/release-staging/
+/third_party/reims-vgpu/target/
+/third_party/metal2vulkan/target/
+*.pem
+*.key
