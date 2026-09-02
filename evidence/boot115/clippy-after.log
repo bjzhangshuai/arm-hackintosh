@@ -1,0 +1,217 @@
+    Checking smallvec v1.15.2
+    Checking bitflags v2.13.1
+   Compiling reims-vgpu v0.1.0 (/home/macvm/src/macvm/third_party/reims-vgpu/crates/reims-vgpu)
+    Checking serde_core v1.0.229
+    Checking spirv v0.4.0+sdk-1.4.341.0
+    Checking parking_lot_core v0.9.12
+    Checking zmij v1.0.23
+    Checking parking_lot v0.12.5
+    Checking itoa v1.0.18
+    Checking reims-vgpu-wire v0.1.0 (/home/macvm/src/macvm/third_party/reims-vgpu/crates/reims-vgpu-wire)
+    Checking memchr v2.8.3
+    Checking metal2vulkan v0.1.0 (/home/macvm/src/macvm/third_party/metal2vulkan)
+    Checking serde_json v1.0.151
+error: empty lines after doc comment
+  --> crates/reims-vgpu/src/runtime/decode/blit.rs:24:1
+   |
+24 | / /// Decoding them lets `runtime::exec` say which; see the arms there.
+25 | |
+26 | | /// The five records `-setSupportsBlitEncoderSPI:` gates.
+27 | | ///
+...  |
+44 | | /// genuinely needs nothing done.
+45 | |
+   | |_^
+46 |   // MTLBlitOption (Metal.framework Headers/MTLBlitCommandEncoder.h).
+47 |   pub const MTL_BLIT_OPTION_NONE: u32 = 0;
+   |   ------------------------------ the comment documents this constant item
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#empty_line_after_doc_comments
+   = note: `-D clippy::empty-line-after-doc-comments` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::empty_line_after_doc_comments)]`
+   = help: if the empty lines are unintentional, remove them
+help: if the doc comment should not document constant item `MTL_BLIT_OPTION_NONE` then comment it out
+   |
+ 5 ~ // /// The three indirect-command-buffer records, which this decoder reads and no
+ 6 ~ // /// executor applies.
+ 7 ~ // ///
+ 8 ~ // /// **Apple's serializer emits all three**, so calling them "rejected" -- which
+ 9 ~ // /// this module did -- was a claim about Apple that the serializer contradicts:
+10 ~ // /// `copyIndirectCommandBuffer:sourceRange:destination:destinationIndex:` writes
+11 ~ // /// `0x131`, `optimizeIndirectCommandBuffer:withRange:` writes `0x138` and
+12 ~ // /// `resetCommandsInBuffer:withRange:` writes `0x139`, each pinned by a fixture
+13 ~ // /// in `reims_vgpu_wire::ops::blit` (`CopyIcb`, `IcbRange`).
+14 ~ // ///
+15 ~ // /// They sit inside this encoder's opcode space, between `0x12c` and `0x13e`, so
+16 ~ // /// they are not a foreign encoder's numbers arriving in a blit segment either.
+17 ~ // ///
+18 ~ // /// They used to be refused whole, under one shared reason. Refusing them said
+19 ~ // /// three different things with one word, and the three are not equivalent:
+20 ~ // /// `0x138` is Metal's *optimization hint*, so skipping it is semantically
+21 ~ // /// correct and costs only speed, while `0x139` leaves commands live that the
+22 ~ // /// guest asked to be reset and `0x131` leaves a destination buffer holding
+23 ~ // /// whatever it held before. Two of the three are lost work and one is not.
+24 ~ // /// Decoding them lets `runtime::exec` say which; see the arms there.
+25 |
+26 ~ // /// The five records `-setSupportsBlitEncoderSPI:` gates.
+27 ~ // ///
+28 ~ // /// This encoder's opcode run does not stop at `0x13e`. It was read that way for
+29 ~ // /// as long as the wire capture drove the class with every capability at its
+30 ~ // /// default, and all sixteen of those default off -- so five real records looked
+31 ~ // /// like selectors Apple never emits, and this decoder answered every one of
+32 ~ // /// them with `ErrUnknownOpcode`.
+33 ~ // ///
+34 ~ // /// Each is pinned by a fixture in [`reims_vgpu_wire::ops::blit`], and the three
+35 ~ // /// fills are writes to guest-visible memory: dropping one leaves the
+36 ~ // /// destination holding whatever it held before, which the guest then reads back
+37 ~ // /// as content it believes it just wrote.
+38 ~ // ///
+39 ~ // /// `0x142` and `0x143` are the [`wire::Ref`] and [`wire::RefSliceLevel`] shapes
+40 ~ // /// exactly, and this module deliberately does **not** fold them into the arms
+41 ~ // /// that already decode those shapes: those arms end in the executor's
+42 ~ // /// unconditional no-op, and a compressed-texture invalidate that silently
+43 ~ // /// joined them would be indistinguishable from a `synchronizeTexture:` that
+44 ~ // /// genuinely needs nothing done.
+   |
+
+error: duplicated attribute
+  --> crates/reims-vgpu/src/runtime/present_identity.rs:19:8
+   |
+19 | #![cfg(feature = "backend-vulkan")]
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+note: first defined here
+  --> crates/reims-vgpu/src/runtime/mod.rs:76:7
+   |
+76 | #[cfg(feature = "backend-vulkan")]
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: remove this attribute
+  --> crates/reims-vgpu/src/runtime/present_identity.rs:19:8
+   |
+19 | #![cfg(feature = "backend-vulkan")]
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#duplicated_attributes
+   = note: `-D clippy::duplicated-attributes` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::duplicated_attributes)]`
+
+error: unused import: `wire_blit::OPCODE_WAIT_FOR_FENCE`
+    --> crates/reims-vgpu/src/runtime/blit_exec.rs:5058:13
+     |
+5058 |         use wire_blit::OPCODE_WAIT_FOR_FENCE;
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `-D unused-imports` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error: unused import: `wire_blit::OPCODE_UPDATE_FENCE`
+    --> crates/reims-vgpu/src/runtime/blit_exec.rs:5073:13
+     |
+5073 |         use wire_blit::OPCODE_UPDATE_FENCE;
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: unused import: `wire_render::OPCODE_DRAW_INDEXED`
+    --> crates/reims-vgpu/src/runtime/exec.rs:3993:13
+     |
+3993 |         use wire_render::OPCODE_DRAW_INDEXED;
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: this function has too many arguments (13/7)
+   --> crates/reims-vgpu/src/contract/iosurface_pages.rs:758:1
+    |
+758 | / fn build_table_plan_from_candidate(
+759 | |     mem: &dyn PagesMemory,
+760 | |     base_kva: u64,
+761 | |     table_offset: u64,
+...   |
+771 | |     len_short_reason: &'static str,
+772 | | ) -> Result<PageTablePlan, Status> {
+    | |__________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#too_many_arguments
+    = note: `-D clippy::too-many-arguments` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::too_many_arguments)]`
+
+error: manual implementation of `.is_multiple_of()`
+   --> crates/reims-vgpu/src/model/regs.rs:325:5
+    |
+325 |     DISPLAY_WIDTH_MM % 10 == 0 && DISPLAY_HEIGHT_MM % 10 == 0,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace with: `DISPLAY_WIDTH_MM.is_multiple_of(10)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#manual_is_multiple_of
+    = note: `-D clippy::manual-is-multiple-of` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::manual_is_multiple_of)]`
+
+error: manual implementation of `.is_multiple_of()`
+   --> crates/reims-vgpu/src/model/regs.rs:325:35
+    |
+325 |     DISPLAY_WIDTH_MM % 10 == 0 && DISPLAY_HEIGHT_MM % 10 == 0,
+    |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace with: `DISPLAY_HEIGHT_MM.is_multiple_of(10)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#manual_is_multiple_of
+
+error: struct update has no effect, all the fields in the struct have already been specified
+   --> crates/reims-vgpu/src/runtime/decode/render.rs:590:11
+    |
+590 |         ..Default::default()
+    |           ^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#needless_update
+    = note: `-D clippy::needless-update` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::needless_update)]`
+
+error: struct update has no effect, all the fields in the struct have already been specified
+   --> crates/reims-vgpu/src/runtime/decode/render.rs:607:11
+    |
+607 |         ..Default::default()
+    |           ^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#needless_update
+
+error: struct update has no effect, all the fields in the struct have already been specified
+   --> crates/reims-vgpu/src/runtime/decode/render.rs:624:11
+    |
+624 |         ..Default::default()
+    |           ^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#needless_update
+
+error: struct update has no effect, all the fields in the struct have already been specified
+    --> crates/reims-vgpu/src/runtime/decode/resource.rs:2327:19
+     |
+2327 |                 ..Default::default()
+     |                   ^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#needless_update
+
+error: this function has too many arguments (8/7)
+   --> crates/reims-vgpu/src/runtime/drain/mod.rs:216:1
+    |
+216 | / fn note_child_fifo_packet(
+217 | |     state: &mut DeviceState,
+218 | |     channel_id: u32,
+219 | |     opcode: u16,
+...   |
+224 | |     stamp_index: u32,
+225 | | ) {
+    | |_^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#too_many_arguments
+
+error: could not compile `reims-vgpu` (lib) due to 10 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: used `assert_eq!` with a literal bool
+    --> crates/reims-vgpu/src/backend/vulkan/engine/caches.rs:1238:9
+     |
+1238 |         assert_eq!(rgba16f.bgra, false);
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#bool_assert_comparison
+     = note: `-D clippy::bool-assert-comparison` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::bool_assert_comparison)]`
+help: replace it with `assert!(..)`
+     |
+1238 -         assert_eq!(rgba16f.bgra, false);
+1238 +         assert!(!rgba16f.bgra);
+     |
+
+error: could not compile `reims-vgpu` (lib test) due to 14 previous errors

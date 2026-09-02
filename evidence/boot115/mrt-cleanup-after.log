@@ -1,0 +1,14 @@
+   Compiling reims-vgpu v0.1.0 (/home/macvm/src/macvm/third_party/reims-vgpu/crates/reims-vgpu)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.91s
+     Running tests/vk_engine_parity.rs (target/debug/deps/vk_engine_parity-cb6c0a9da624c5b9)
+
+running 6 tests
+test mrt_depth_attachment_matrix ... ok
+test mrt_framebuffer_fetch_pooled_regression ... ok
+test mrt_framebuffer_fetch_resident_regression ... ok
+test mrt_rg16float_secondary_builds_and_renders ... ok
+test mrt_secondary_attachment_becomes_sampleable_resident ... ok
+test single_rt_draw_unaffected_by_mrt_path ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 43 filtered out; finished in 2.20s
+

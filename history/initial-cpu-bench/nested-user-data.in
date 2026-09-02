@@ -1,0 +1,14 @@
+#cloud-config
+users:
+  - default
+  - name: bench
+    gecos: Benchmark User
+    groups: users
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: true
+    ssh_authorized_keys:
+      - __SSH_PUBLIC_KEY__
+ssh_pwauth: false
+package_update: false
+package_upgrade: false

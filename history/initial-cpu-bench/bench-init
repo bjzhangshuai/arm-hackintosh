@@ -1,0 +1,11 @@
+#!/bin/sh
+echo SYSTEM_BENCH_BEGIN
+/root/bench-arm64 >/dev/null
+run=1
+while [ "$run" -le 5 ]; do
+    echo "SYSTEM_RUN $run"
+    /root/bench-arm64
+    run=$((run + 1))
+done
+echo SYSTEM_BENCH_DONE
+exec /bin/sh

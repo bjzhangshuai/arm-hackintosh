@@ -1,0 +1,4 @@
+Sep 02 21:53:43 macvm-validation kernel: qemu-system-aar[702241]: segfault at 7d ip 0000709470a7c4c8 sp 00007ffc1cb3a1b0 error 6 in libvulkan_lvp.so[7c4c8,709470a49000+4d8000] likely on CPU 4 (core 4, socket 0)
+Sep 02 21:53:43 macvm-validation kernel: Code: 49 8b 83 c0 05 00 00 49 01 c4 48 89 85 60 f5 ff ff 49 8b 04 24 66 48 0f 6e e0 48 89 85 48 f5 ff ff 66 0f 6c cc 48 85 c0 74 04 <c6> 40 0c 01 41 8b 47 0c 0f 11 03 0f 11 43 10 c7 03 e1 75 9b 3b 89
+Sep 02 21:59:45 macvm-validation kernel: mrt_framebuffer[709359]: segfault at 81 ip 000076fb4ca7c4c8 sp 000076fb4fbef790 error 6 in libvulkan_lvp.so[7c4c8,76fb4ca49000+4d8000] likely on CPU 8 (core 8, socket 0)
+Sep 02 21:59:45 macvm-validation kernel: Code: 49 8b 83 c0 05 00 00 49 01 c4 48 89 85 60 f5 ff ff 49 8b 04 24 66 48 0f 6e e0 48 89 85 48 f5 ff ff 66 0f 6c cc 48 85 c0 74 04 <c6> 40 0c 01 41 8b 47 0c 0f 11 03 0f 11 43 10 c7 03 e1 75 9b 3b 89

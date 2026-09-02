@@ -1,0 +1,25 @@
+   Compiling reims-vgpu v0.1.0 (/home/macvm/src/macvm/third_party/reims-vgpu/crates/reims-vgpu)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.06s
+     Running tests/vk_engine_parity.rs (target/debug/deps/vk_engine_parity-cb6c0a9da624c5b9)
+
+running 1 test
+test mrt_framebuffer_fetch_resident_regression ... Validation Error: [ VUID-VkPipelineColorBlendStateCreateInfo-pAttachments-00605 ] | MessageID = 0xcb4717d3
+vkCreateGraphicsPipelines(): pCreateInfos[0].pColorBlendState->pAttachments[1] is different than pAttachments[0] and independentBlend feature was not enabled.
+The Vulkan spec states: If the independentBlend feature is not enabled, all elements of pAttachments must be identical (https://docs.vulkan.org/spec/latest/chapters/framebuffer.html#VUID-VkPipelineColorBlendStateCreateInfo-pAttachments-00605)
+
+Validation Error: [ VUID-VkFramebufferCreateInfo-attachmentCount-00876 ] | MessageID = 0xd452b83b
+vkCreateFramebuffer(): pCreateInfo->attachmentCount 2 does not match attachmentCount of 3 of VkRenderPass 0x110000000011 being used to create Framebuffer.
+The Vulkan spec states: attachmentCount must be equal to the attachment count specified in renderPass (https://docs.vulkan.org/spec/latest/chapters/renderpass.html#VUID-VkFramebufferCreateInfo-attachmentCount-00876)
+Objects: 1
+    [0] VkRenderPass 0x110000000011
+
+Validation Error: [ UNASSIGNED-CoreValidation-DrawState-InvalidRenderpass ] | MessageID = 0xa1662b9
+vkCmdBeginRenderPass(): pRenderPassBegin You cannot start a render pass using a framebuffer with a different number of attachments (3 vs 2).
+Objects: 2
+    [0] VkRenderPass 0x110000000011
+    [1] VkFramebuffer 0x1d000000001d
+
+error: test failed, to rerun pass `-p reims-vgpu --test vk_engine_parity`
+
+Caused by:
+  process didn't exit successfully: `/home/macvm/src/macvm/third_party/reims-vgpu/target/debug/deps/vk_engine_parity-cb6c0a9da624c5b9 mrt_framebuffer_fetch_resident_regression --exact --nocapture --test-threads=1` (signal: 11, SIGSEGV: invalid memory reference)
