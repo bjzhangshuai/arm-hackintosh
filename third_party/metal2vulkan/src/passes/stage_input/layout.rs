@@ -19,10 +19,9 @@ pub(super) fn include_existing_private_globals(ctx: &mut Ctx) {
 }
 
 impl Ctx {
-    /// Register descriptor/private globals that older SPIR-V 1.4-style inputs considered part of the
-    /// entry interface. Finalization filters OpEntryPoint back down to Input/Output variables after
-    /// the runtime-compatible header/version choice is made, while still keeping referenced descriptor
-    /// variables alive for DescriptorSet/Binding based binding.
+    /// Register descriptor/private globals for the SPIR-V 1.4+ entry interface.
+    /// Finalization removes dead globals and reconciles the interface against
+    /// the final version after capability closure, which may raise it.
     pub(in crate::passes) fn interface_buffer_var(&mut self, var: Word) {
         let v = self.module.header.as_ref().map(|h| h.version).unwrap_or(0);
         // version word: high byte major, next minor. 1.4 = 0x00010400.

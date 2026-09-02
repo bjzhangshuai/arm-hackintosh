@@ -3,8 +3,8 @@
 use super::*;
 use module_cleanup::{
     add_needed_capabilities, drop_dangling_debug, drop_dead_unreferenced_variables,
-    drop_unused_int64_capability, drop_unused_variable_pointer_capabilities,
-    function_referenced_ids, gc_dead_globals,
+    drop_unused_descriptor_loads, drop_unused_int64_capability,
+    drop_unused_variable_pointer_capabilities, function_referenced_ids, gc_dead_globals,
 };
 
 pub(in crate::passes) fn finalize(
@@ -39,20 +39,6 @@ pub(in crate::passes) fn finalize(
     let globals = std::mem::take(&mut ctx.new_globals);
     ctx.module.types_global_values.extend(globals);
 
-    // Emit a Vulkan-compatible entry interface. Descriptor-backed resources are
-    // bound through DescriptorSet/Binding decorations, not through the
-    // OpEntryPoint interface list. Keep the interface restricted to user-visible
-    // stage Input/Output variables even when the LLVM/SPIR-V input arrived as
-    // 1.4+ and earlier passes registered every referenced global. Mesa llvmpipe
-    // otherwise tries to compile modules whose entry interface contains
-    // StorageBuffer globals and can abort in LLVM instead of returning a clean
-    // VkResult.
-    if let Some(header) = ctx.module.header.as_mut() {
-        if header.version() >= (1, 4) {
-            header.set_version(1, 3);
-        }
-    }
-
     let entry_id = ctx.module.functions[entry_idx]
         .def
         .as_ref()
@@ -68,6 +54,7 @@ pub(in crate::passes) fn finalize(
         Operand::IdRef(entry_id),
         Operand::LiteralString("main".into()),
     ];
+    drop_unused_descriptor_loads(&mut ctx.module);
     let referenced_from_functions = function_referenced_ids(&ctx.module);
     let storage_class_of_global = |id: Word| -> Option<StorageClass> {
         ctx.module.types_global_values.iter().find_map(|inst| {
@@ -168,6 +155,37 @@ pub(in crate::passes) fn finalize(
     drop_unused_int64_capability(ctx);
     drop_unused_variable_pointer_capabilities(ctx);
     add_needed_capabilities(ctx);
+
+    // Preserve the emitter's SPIR-V semantics. In particular, scalar-condition
+    // vector/aggregate OpSelect requires 1.4: a header downgrade is not a
+    // semantics-preserving conversion to 1.3. Starting in 1.4 the entry
+    // interface must also include every statically used global variable, not
+    // just stage I/O. DescriptorSet/Binding decorations do not replace that
+    // requirement. Resolve this after capability closure, which can raise the
+    // version (for example, ShaderViewportIndex), and after dead-global GC.
+    if ctx
+        .module
+        .header
+        .as_ref()
+        .is_some_and(|h| h.version() >= (1, 4))
+    {
+        let extra_globals: Vec<Word> = ctx
+            .module
+            .types_global_values
+            .iter()
+            .filter(|inst| inst.class.opcode == Op::Variable)
+            .filter_map(|inst| inst.result_id)
+            .filter(|id| referenced_from_functions.contains(id) && interface_ids.insert(*id))
+            .collect();
+        let entry = ctx
+            .module
+            .entry_points
+            .last_mut()
+            .ok_or("finalize: synthesized entry point missing")?;
+        entry
+            .operands
+            .extend(extra_globals.into_iter().map(Operand::IdRef));
+    }
 
     Ok(())
 }

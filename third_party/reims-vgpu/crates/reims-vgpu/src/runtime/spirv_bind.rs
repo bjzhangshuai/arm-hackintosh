@@ -68,7 +68,7 @@ const OP_ATOMIC_FLAG_CLEAR: u16 = 319;
 const OP_CAPABILITY: u16 = 17;
 /// SPIR-V `Capability StorageImageWriteWithoutFormat` (writes to an `Unknown`
 /// format storage image). Paired with the Vulkan feature of the same name.
-const CAPABILITY_STORAGE_IMAGE_WRITE_WITHOUT_FORMAT: u32 = 34;
+const CAPABILITY_STORAGE_IMAGE_WRITE_WITHOUT_FORMAT: u32 = 56;
 /// SPIR-V `Decoration Binding`.
 const DECORATION_BINDING: u32 = 33;
 const HEADER_WORDS: usize = 5;
@@ -495,6 +495,10 @@ pub fn storage_image_access(words: &[u32], wanted_binding: u32) -> Option<Storag
             Root::Ambiguous => return Some(StorageImageAccess::AmbiguousBinding),
         };
 
+    // Raw word equality is not an ID-use test: an image numbered 32 can
+    // collide with a float width, binding, constant or shuffle component.
+    // Use the translator's locked operand grammar for the escape scan.
+    let references = metal2vulkan::spirv_instruction_references(words).ok()?;
     let derived = propagate_derived(words, bound, None, |opcode, word_count, i, _derived| {
         opcode == OP_LOAD && word_count >= 4 && words[i + 3] as usize == root
     });
@@ -504,7 +508,7 @@ pub fn storage_image_access(words: &[u32], wanted_binding: u32) -> Option<Storag
     let mut write = false;
     let mut unknown = false;
     let mut i = HEADER_WORDS;
-    while i < words.len() {
+    for references in references {
         let word_count = (words[i] >> 16) as usize;
         let opcode = (words[i] & 0xffff) as u16;
         match opcode {
@@ -528,7 +532,7 @@ pub fn storage_image_access(words: &[u32], wanted_binding: u32) -> Option<Storag
             }
             OP_RETURN_VALUE if word_count >= 2 && is_derived(words[i + 1]) => unknown = true,
             OP_LOAD | OP_COPY_OBJECT | OP_SELECT | OP_PHI => {}
-            _ if words[i + 1..i + word_count].iter().copied().any(is_derived) => unknown = true,
+            _ if references.ids.into_iter().any(is_derived) => unknown = true,
             _ => {}
         }
         i += word_count;
@@ -1283,7 +1287,9 @@ mod tests {
         // The new capability is spliced after the last OpCapability, before the
         // OpMemoryModel section (capabilities must precede everything else).
         assert_eq!(words[7], (2u32 << 16) | 17);
-        assert_eq!(words[8], CAPABILITY_STORAGE_IMAGE_WRITE_WITHOUT_FORMAT);
+        // Khronos Capability StorageImageWriteWithoutFormat is 56. Pin the
+        // wire value independently; 34 names ImageCubeArray instead.
+        assert_eq!(words[8], 56);
         assert_eq!(
             words[9] & 0xffff,
             14,
@@ -1749,6 +1755,49 @@ mod tests {
             storage_image_access(&words, 34),
             Some(StorageImageAccess::AmbiguousBinding)
         );
+    }
+
+    #[test]
+    fn storage_access_ignores_literal_id_collisions_but_preserves_real_escapes() {
+        for image_id in [16, 32, 56] {
+            let mut words = vec![0x0723_0203, 0x10000, 0, 128, 0];
+            for (opcode, operands) in [
+                (22, vec![20, 32]),
+                (21, vec![9, 32, 0]),
+                (43, vec![9, 10, image_id]),
+                (25, vec![1, 20, 1, 0, 0, 0, 2, 0]),
+                (32, vec![2, 0, 1]),
+                (59, vec![2, 3, 0]),
+                (71, vec![3, 33, 163]),
+                (61, vec![1, image_id, 3]),
+                (79, vec![11, 12, 13, 14, image_id, 0]),
+                (12, vec![20, 15, 70, image_id, 71]),
+                (99, vec![image_id, 80, 81]),
+            ] {
+                words.push(((operands.len() as u32 + 1) << 16) | opcode);
+                words.extend(operands);
+            }
+            assert_eq!(
+                storage_image_access(&words, 163),
+                Some(StorageImageAccess::WriteOnly)
+            );
+            let base = words.len();
+            // An actual store of the opaque handle is still an escape.
+            words.extend([(3 << 16) | 62, 82, image_id]);
+            assert_eq!(
+                storage_image_access(&words, 163),
+                Some(StorageImageAccess::Unknown)
+            );
+            words.truncate(base);
+            words.extend([(5 << 16) | 98, 83, 84, image_id, 80]);
+            assert_eq!(
+                storage_image_access(&words, 163),
+                Some(StorageImageAccess::ReadWrite)
+            );
+            words.truncate(base);
+            words.extend([(2 << 16) | 65535, image_id]);
+            assert_eq!(storage_image_access(&words, 163), None);
+        }
     }
 
     /// The two reflectors share `propagate_derived` but seed it differently, and

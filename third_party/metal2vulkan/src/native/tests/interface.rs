@@ -17,7 +17,66 @@ use spirv::{BuiltIn, Capability, Decoration, Op, Scope, SelectionControl, Storag
 use std::collections::{HashMap, HashSet};
 
 #[test]
-fn native_vertex_storage_buffer_is_not_entry_interface() {
+fn native_scalar_condition_vector_select_keeps_compatible_spirv_version() {
+    // LLVM permits a scalar condition to select a whole vector. SPIR-V only
+    // permits that form from 1.4; changing the header to 1.3 is not a lowering.
+    let ll = r#"
+target datalayout = "e-p:64:64:64"
+target triple = "air64-apple-macosx14.0.0"
+define <4 x float> @fragment_select(<4 x float> %position) {
+  %x = extractelement <4 x float> %position, i32 0
+  %cond = fcmp ogt float %x, 0.000000e+00
+  %out = select i1 %cond, <4 x float> %position, <4 x float> zeroinitializer
+  ret <4 x float> %out
+}
+!air.fragment = !{!0}
+!0 = !{ptr @fragment_select, !1, !3}
+!1 = !{!2}
+!2 = !{!"air.render_target", i32 0, i32 0, !"air.arg_type_name", !"float4"}
+!3 = !{!4}
+!4 = !{i32 0, !"air.position", !"air.center", !"air.no_perspective", !"air.arg_type_name", !"float4", !"air.arg_name", !"position"}
+"#;
+    let tmp = std::env::temp_dir().join(format!(
+        "metal2vulkan_scalar_vector_select_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&tmp).expect("scratch directory");
+    let result = (|| -> Result<(), String> {
+        let out = crate::translate_sanitized_native(ll, Stage::Fragment, &tmp)?;
+        let module = load_bytes(&out).map_err(|e| e.to_string())?;
+        let defs: HashMap<Word, &Instruction> = module
+            .all_inst_iter()
+            .filter_map(|inst| inst.result_id.map(|id| (id, inst)))
+            .collect();
+        let mut selected_vector = false;
+        for inst in module
+            .all_inst_iter()
+            .filter(|inst| inst.class.opcode == Op::Select)
+        {
+            let Some(result_ty) = inst.result_type.and_then(|id| defs.get(&id)) else {
+                continue;
+            };
+            if result_ty.class.opcode != Op::TypeVector {
+                continue;
+            }
+            selected_vector = true;
+            let cond = id_ref_operand(&inst.operands[0]).expect("condition id");
+            let cond_type = defs[&cond].result_type.expect("condition type");
+            if defs[&cond_type].class.opcode == Op::TypeBool
+                && module.header.as_ref().unwrap().version() < (1, 4)
+            {
+                return Err("scalar condition selects a vector in SPIR-V older than 1.4".into());
+            }
+        }
+        assert!(selected_vector, "fixture must retain a vector OpSelect");
+        tools::spirv_val_bytes(&out, &tmp)
+    })();
+    std::fs::remove_dir_all(&tmp).expect("remove owned scratch directory");
+    result.expect("scalar-conditioned vector select validates");
+}
+
+#[test]
+fn native_vertex_storage_buffer_has_version_correct_entry_interface() {
     let ll = r#"
 source_filename = "synth_vertex_buffer_interface"
 target datalayout = "e-p:64:64:64"
@@ -62,11 +121,15 @@ attributes #0 = { nounwind }
         .iter()
         .filter(|inst| {
             inst.class.opcode == Op::Variable
-                && inst.operands.first() == Some(&Operand::StorageClass(StorageClass::StorageBuffer))
+                && inst.operands.first()
+                    == Some(&Operand::StorageClass(StorageClass::StorageBuffer))
         })
         .filter_map(|inst| inst.result_id)
         .collect();
-    assert!(!storage_vars.is_empty(), "expected a StorageBuffer variable");
+    assert!(
+        !storage_vars.is_empty(),
+        "expected a StorageBuffer variable"
+    );
     assert!(
         module.annotations.iter().any(|inst| {
             inst.class.opcode == Op::Decorate
@@ -84,9 +147,14 @@ attributes #0 = { nounwind }
             _ => None,
         })
         .collect();
+    let all_globals_required = module.header.as_ref().unwrap().version() >= (1, 4);
     assert!(
-        storage_vars.is_disjoint(&entry_interface),
-        "StorageBuffer variables must not be listed on OpEntryPoint"
+        all_globals_required,
+        "native emission must retain its 1.4 semantics"
+    );
+    assert!(
+        storage_vars.is_subset(&entry_interface),
+        "SPIR-V 1.4 requires used StorageBuffer variables in OpEntryPoint"
     );
     for id in &entry_interface {
         let storage_class = defs
@@ -94,12 +162,13 @@ attributes #0 = { nounwind }
             .and_then(|inst| inst.operands.first())
             .unwrap_or_else(|| panic!("entry interface id {id} is not a variable"));
         assert!(
-            matches!(
-                storage_class,
-                Operand::StorageClass(StorageClass::Input)
-                    | Operand::StorageClass(StorageClass::Output)
-            ),
-            "entry interface id {id} has non-stage storage class {storage_class:?}"
+            all_globals_required
+                || matches!(
+                    storage_class,
+                    Operand::StorageClass(StorageClass::Input)
+                        | Operand::StorageClass(StorageClass::Output)
+                ),
+            "pre-1.4 entry interface id {id} has non-stage storage class {storage_class:?}"
         );
     }
     let asm = disassemble(&out).expect("disassemble transformed");
@@ -115,7 +184,7 @@ attributes #0 = { nounwind }
 
 #[test]
 fn native_half_location_varyings_use_float32_stage_interface() {
-    fn defs<'a>(module: &'a crate::spirv_module::Module) -> HashMap<Word, &'a Instruction> {
+    fn defs(module: &crate::spirv_module::Module) -> HashMap<Word, &Instruction> {
         module
             .types_global_values
             .iter()

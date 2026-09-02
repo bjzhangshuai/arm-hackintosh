@@ -46,6 +46,8 @@ use crate::runtime::objects;
 // re-exported flat so callers keep naming its items
 // `crate::runtime::metal_draw::<name>`.
 #[cfg(feature = "backend-vulkan")]
+mod graphics_storage;
+#[cfg(feature = "backend-vulkan")]
 mod vulkan;
 // Only for `exec`'s pass-extent census, which declares its own copy of these
 // bands because it runs on every backend. See
@@ -2848,7 +2850,122 @@ fn sample_miss_detail<M: HostMemory + HostOps>(
                 ),
             }
         }
-        other => format!("type={other} desc_len={desc_len} reason=unsupported_object_type"),
+        other => {
+            use crate::observe::artifact::{self, Kind};
+            if artifact::enabled() {
+                // A diagnostic prefix cap, not a decoder size limit. Read at
+                // the point of use while this task's object mapping is live.
+                // No guest writes or MMIO-register reads are performed.
+                let length = descriptor_capture_prefix_len(desc_len);
+                let mut bytes = vec![0u8; length];
+                let result = gva_mem::read_task_gva_by_id(
+                    &DescriptorProbeMemory(host),
+                    &state.tasks,
+                    task_id,
+                    entry.descriptor_gva,
+                    &mut bytes,
+                    state.page_shift,
+                );
+                if result.is_ok() {
+                    artifact::capture(Kind::TextureDescriptor, &format!(
+                        "task={task_id} ref={texture_ref} type={other} gva={:#x} declared_length={desc_len} captured_length={length} page_shift={}\n",
+                        entry.descriptor_gva, state.page_shift,
+                    ), &bytes);
+                } else if crate::observe::first_sight(
+                    "contract_capture_descriptor_unmapped",
+                    ((task_id as u64) << 32) | texture_ref as u64,
+                ) {
+                    crate::observe::fail(format!("contract_capture_failed reason=descriptor_unmapped task={task_id} ref={texture_ref} type={other}"));
+                }
+            }
+            format!("type={other} desc_len={desc_len} reason=unsupported_object_type")
+        }
+    }
+}
+
+fn descriptor_capture_prefix_len(declared: u32) -> usize {
+    (declared as usize).min(64 * 1024)
+}
+
+/// Even page-table reads made by this optional probe must stay in RAM. Check
+/// every addressed byte, not just endpoints: a host region can end mid-page.
+struct DescriptorProbeMemory<'a, M>(&'a M);
+
+impl<M: HostMemory + HostOps> HostMemory for DescriptorProbeMemory<'_, M> {
+    fn read_gpa(&self, gpa: u64, bytes: &mut [u8]) -> Result<(), crate::runtime::host::MemError> {
+        use crate::runtime::host::MemError;
+        let end = gpa
+            .checked_add(bytes.len() as u64)
+            .ok_or(MemError::Overflow)?;
+        if !(gpa..end).all(|address| self.0.is_ram_gpa(address)) {
+            return Err(MemError::NotRam);
+        }
+        self.0.read_gpa(gpa, bytes)
+    }
+    fn write_gpa(
+        &mut self,
+        _gpa: u64,
+        _bytes: &[u8],
+    ) -> Result<(), crate::runtime::host::MemError> {
+        Err(crate::runtime::host::MemError::BadArgs)
+    }
+}
+
+#[cfg(test)]
+mod descriptor_capture_tests {
+    use super::*;
+    use crate::runtime::host::{HostAction, MemError};
+
+    #[test]
+    fn diagnostic_prefix_is_bounded_and_does_not_round_up_guest_lengths() {
+        for n in [0, 1, 175, 176, 4096, 65535, 65536] {
+            assert_eq!(super::descriptor_capture_prefix_len(n), n as usize);
+        }
+        for n in [65537, 1 << 30, u32::MAX] {
+            assert_eq!(super::descriptor_capture_prefix_len(n), 65536);
+        }
+    }
+
+    #[test]
+    fn probe_cannot_read_mmio_holes_or_overflow_and_never_writes() {
+        struct Host(std::cell::Cell<usize>);
+        impl HostMemory for Host {
+            fn read_gpa(&self, _: u64, bytes: &mut [u8]) -> Result<(), MemError> {
+                self.0.set(self.0.get() + 1);
+                bytes.fill(42);
+                Ok(())
+            }
+            fn write_gpa(&mut self, _: u64, _: &[u8]) -> Result<(), MemError> {
+                panic!("a probe must never write")
+            }
+        }
+        impl HostOps for Host {
+            fn mono_ns(&self) -> u64 {
+                0
+            }
+            fn enqueue(&mut self, _: HostAction) {
+                panic!("no probe actions")
+            }
+            fn schedule_bh(&mut self) {
+                panic!("no probe actions")
+            }
+            fn is_ram_gpa(&self, gpa: u64) -> bool {
+                gpa != 4
+            }
+        }
+        let host = Host(std::cell::Cell::new(0));
+        let mut probe = DescriptorProbeMemory(&host);
+        let mut bytes = [0; 3];
+        assert_eq!(probe.read_gpa(3, &mut bytes), Err(MemError::NotRam));
+        assert_eq!(
+            probe.read_gpa(u64::MAX, &mut bytes),
+            Err(MemError::Overflow)
+        );
+        assert_eq!(probe.write_gpa(0, &bytes), Err(MemError::BadArgs));
+        assert_eq!(host.0.get(), 0);
+        assert_eq!(probe.read_gpa(5, &mut bytes), Ok(()));
+        assert_eq!(bytes, [42; 3]);
+        assert_eq!(host.0.get(), 1);
     }
 }
 
@@ -3433,10 +3550,7 @@ pub fn writeback_chain_rgba<M: HostMemory + HostOps>(
     crate::observe::fail(format!(
         "writeback_chain_rgba reason=resident_chain_abandoned_cpu_recovery \
          mid={} {}x{} fmt={:#x}",
-        rt.mapping_id,
-        rt.width,
-        rt.height,
-        rt.format
+        rt.mapping_id, rt.width, rt.height, rt.format
     ));
     let wrote = mapping_write::write_rgba8_image_changed(
         state,
@@ -3590,7 +3704,11 @@ fn texture_object_generation(object_ref: u32, descriptor_gva: u64, desc_bytes: &
         h ^= u64::from(*b);
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    if h == 0 { 1 } else { h }
+    if h == 0 {
+        1
+    } else {
+        h
+    }
 }
 
 /// Resolve object-list type 9 into an engine-resident private texture target.

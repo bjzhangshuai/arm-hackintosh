@@ -132,6 +132,7 @@ pub fn translate(mtl: u16) -> Result<PixelFormat, TranslateReason> {
         p::MTL_FORMAT_R32_SINT => linear(vk::Format::R32_SINT, 4),
         p::MTL_FORMAT_R32_FLOAT => linear(vk::Format::R32_SFLOAT, 4),
         p::MTL_FORMAT_RG16_FLOAT => linear(vk::Format::R16G16_SFLOAT, 4),
+        p::MTL_FORMAT_RG16_UINT => linear(vk::Format::R16G16_UINT, 4),
         p::MTL_FORMAT_RGBA8_UNORM => linear(vk::Format::R8G8B8A8_UNORM, 4),
         p::MTL_FORMAT_RGBA8_UNORM_SRGB => {
             srgb(vk::Format::R8G8B8A8_SRGB, vk::Format::R8G8B8A8_UNORM, 4)
@@ -217,6 +218,7 @@ pub fn sampled_pixels(mtl: u16) -> Result<(TexelLayout, Option<TranslateReason>)
         // gate — or the sample stays fail-visible.
         vk::Format::R16_SFLOAT => TexelLayout::R16Float,
         vk::Format::R32_SFLOAT => TexelLayout::R32Float,
+        vk::Format::R16G16_UINT => TexelLayout::Rg16Uint,
         _ => return Err(TranslateReason::NoSampledLayout(mtl)),
     };
     Ok((layout, srgb_decline(&f, mtl)))
@@ -236,6 +238,7 @@ pub fn vk_texel_layout(layout: TexelLayout) -> vk::Format {
         TexelLayout::Rg8 => vk::Format::R8G8_UNORM,
         TexelLayout::R16Float => vk::Format::R16_SFLOAT,
         TexelLayout::R32Float => vk::Format::R32_SFLOAT,
+        TexelLayout::Rg16Uint => vk::Format::R16G16_UINT,
     }
 }
 
@@ -399,6 +402,7 @@ pub fn bytes_per_texel(format: vk::Format) -> Option<u32> {
         | vk::Format::R32_SINT
         | vk::Format::R32_SFLOAT
         | vk::Format::R16G16_SFLOAT
+        | vk::Format::R16G16_UINT
         | vk::Format::R8G8B8A8_UNORM
         | vk::Format::R8G8B8A8_SRGB
         | vk::Format::R8G8B8A8_UINT
@@ -557,6 +561,12 @@ mod tests {
         (
             p::MTL_FORMAT_RG16_FLOAT,
             vk::Format::R16G16_SFLOAT,
+            4,
+            TransferFunction::Linear,
+        ),
+        (
+            p::MTL_FORMAT_RG16_UINT,
+            vk::Format::R16G16_UINT,
             4,
             TransferFunction::Linear,
         ),
@@ -946,6 +956,7 @@ mod tests {
             (TexelLayout::Rg8, vk::Format::R8G8_UNORM, 2),
             (TexelLayout::R16Float, vk::Format::R16_SFLOAT, 2),
             (TexelLayout::R32Float, vk::Format::R32_SFLOAT, 4),
+            (TexelLayout::Rg16Uint, vk::Format::R16G16_UINT, 4),
         ] {
             assert_eq!(
                 vk_texel_layout(layout),
@@ -983,6 +994,7 @@ mod tests {
                 p::MTL_FORMAT_R16_FLOAT,
                 p::MTL_FORMAT_RG8_UNORM,
                 p::MTL_FORMAT_R32_FLOAT,
+                p::MTL_FORMAT_RG16_UINT,
                 p::MTL_FORMAT_RGBA8_UNORM,
                 p::MTL_FORMAT_RGBA8_UNORM_SRGB,
                 p::MTL_FORMAT_BGRA8_UNORM,

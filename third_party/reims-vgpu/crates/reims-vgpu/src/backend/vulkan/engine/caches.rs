@@ -125,6 +125,7 @@ pub(crate) struct PassKey {
     /// self-dependency — the Vulkan feedback-loop form MoltenVK lowers to Metal
     /// programmable blending. `false` keeps the pass byte-identical.
     pub color_input: bool,
+    pub secondary_color_inputs: u8,
 }
 
 impl PassKey {
@@ -138,6 +139,7 @@ impl PassKey {
             secondary_count: 0,
             depth: None,
             color_input: false,
+            secondary_color_inputs: 0,
         }
     }
 }
@@ -401,6 +403,11 @@ impl ObjectCaches {
             return Ok((key, m));
         }
         counters.shader_misses.fetch_add(1, Ordering::Relaxed);
+        if let Err(decline) = super::shader_contract::check(words, &ctx.features) {
+            let error = DrawError::ShaderContract(decline);
+            self.shaders.insert_negative(key, error.clone());
+            return Err(error);
+        }
         let created = ctx
             .device
             .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(words), None);
@@ -579,6 +586,25 @@ impl ObjectCaches {
                     .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
             );
         }
+        // Snapshot attachments follow the secondary outputs. Sparse Metal
+        // input indices keep their positions in pInputAttachments below.
+        let secondary_snapshot_base = attachments.len() as u32;
+        for i in 1..=key.secondary_count as usize {
+            if key.secondary_color_inputs & (1 << i) == 0 {
+                continue;
+            }
+            attachments.push(
+                vk::AttachmentDescription::default()
+                    .format(key.secondary[i - 1].format)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .load_op(vk::AttachmentLoadOp::LOAD)
+                    .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                    .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                    .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                    .initial_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+            );
+        }
         // Depth attachment is appended LAST (after color + secondaries), so its
         // index is the current attachment count and color slot 0 is untouched.
         let depth_ref = key.depth.map(|d| {
@@ -622,13 +648,28 @@ impl ObjectCaches {
                 .attachment(index)
                 .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
         });
-        let input_ref = [vk::AttachmentReference::default()
-            .attachment(1)
-            .layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+        let fetch_mask = key.secondary_color_inputs | u8::from(key.color_input);
+        let input_count = u8::BITS - fetch_mask.leading_zeros();
+        let mut input_ref = vec![
+            vk::AttachmentReference::default()
+                .attachment(vk::ATTACHMENT_UNUSED)
+                .layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+            input_count as usize
+        ];
+        if key.color_input {
+            input_ref[0].attachment = 1;
+        }
+        let mut next_snapshot = secondary_snapshot_base;
+        for (i, input) in input_ref.iter_mut().enumerate().skip(1) {
+            if key.secondary_color_inputs & (1 << i) != 0 {
+                input.attachment = next_snapshot;
+                next_snapshot += 1;
+            }
+        }
         let mut subpass_desc = vk::SubpassDescription::default()
             .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
             .color_attachments(&color_ref);
-        if key.color_input {
+        if fetch_mask != 0 {
             subpass_desc = subpass_desc.input_attachments(&input_ref);
         }
         if let Some(depth_ref) = &depth_ref {
@@ -686,7 +727,7 @@ impl ObjectCaches {
         if key.depth.is_some() {
             deps.extend_from_slice(&depth_deps);
         }
-        if key.color_input {
+        if fetch_mask != 0 {
             deps.push(fetch_dep);
         }
         let mut rp_info = vk::RenderPassCreateInfo::default()
@@ -1235,7 +1276,7 @@ mod fifo_cache_tests {
         let mut rgba16f = PassKey::single(false, false);
         rgba16f.format = vk::Format::R16G16B16A16_SFLOAT;
         assert_ne!(legacy, rgba16f);
-        assert_eq!(rgba16f.bgra, false);
+        assert!(!rgba16f.bgra);
         assert_eq!(rgba16f.format, vk::Format::R16G16B16A16_SFLOAT);
     }
 

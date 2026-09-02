@@ -1021,6 +1021,175 @@ pub(crate) struct StagedTexture {
     writeback: TextureWriteback,
 }
 
+/// A synchronous graphics write keeps the exact pre-draw physical spans. A
+/// second address walk must agree before any guest/cache writeback occurs.
+#[cfg(feature = "backend-vulkan")]
+pub(crate) struct GraphicsStagedTexture {
+    pub texture: StagedTexture,
+    physical_spans: Vec<(u64, u64)>,
+    mapping_generation: Option<(u32, u32)>,
+}
+
+#[cfg(feature = "backend-vulkan")]
+fn graphics_backing_spans<M: HostMemory + HostOps>(
+    state: &mut DeviceState,
+    host: &M,
+    task_id: u32,
+    writeback: &TextureWriteback,
+) -> Result<Vec<(u64, u64)>, ComputeStatus> {
+    use crate::contract::iosurface_pages::entry_gpa_shift;
+    let fail = || ComputeStatus::GuestIo("graphics_storage_backing_unresolved");
+    let page_size = 1u64.checked_shl(state.page_shift).ok_or_else(fail)?;
+    let (start, end, mapping) = match writeback {
+        TextureWriteback::Linear {
+            gva,
+            row_stride,
+            height,
+            ..
+        } => (
+            *gva,
+            gva.checked_add(row_stride.checked_mul(*height as u64).ok_or_else(fail)?)
+                .ok_or_else(fail)?,
+            None,
+        ),
+        TextureWriteback::Type11 {
+            mapping_id,
+            surface_offset,
+            span_end,
+            ..
+        } => {
+            if !crate::runtime::mapper::revalidate_mapping_pages(state, host, *mapping_id) {
+                return Err(fail());
+            }
+            (*surface_offset, *span_end, Some(*mapping_id))
+        }
+        TextureWriteback::None => {
+            return Err(ComputeStatus::Unsupported(
+                "graphics_storage_host_only_backing",
+            ))
+        }
+    };
+    if end <= start {
+        return Err(fail());
+    }
+    let mut out = Vec::new();
+    let mut at = start;
+    while at < end {
+        let count = (page_size - (at & (page_size - 1))).min(end - at);
+        let gpa = if let Some(id) = mapping {
+            let entry = *state
+                .mappings
+                .get(&id)
+                .and_then(|m| m.page_entries.get((at / page_size) as usize))
+                .ok_or_else(fail)?;
+            entry_gpa_shift(entry, state.page_shift).ok_or_else(fail)? + at % page_size
+        } else {
+            gva_mem::translate_task_gva(
+                host,
+                state.tasks.get(task_id as usize).ok_or_else(fail)?,
+                at,
+                state.page_shift,
+            )
+            .ok_or_else(fail)?
+        };
+        out.push((gpa, gpa.checked_add(count).ok_or_else(fail)?));
+        at += count;
+    }
+    Ok(out)
+}
+
+#[cfg(feature = "backend-vulkan")]
+pub(crate) fn stage_graphics_storage<M: HostMemory + HostOps>(
+    state: &mut DeviceState,
+    host: &mut M,
+    task_id: u32,
+    texture_ref: u32,
+    binding: u32,
+) -> Result<GraphicsStagedTexture, ComputeStatus> {
+    let mut texture = stage_texture_raw(state, host, task_id, texture_ref, binding, true)?;
+    let physical_spans = graphics_backing_spans(state, host, task_id, &texture.writeback)?;
+    if texture.seed_skipped {
+        let candidate = texture.residency.ok_or(ComputeStatus::MissingTexture(
+            "graphics_storage_seed_identity",
+        ))?;
+        let (bytes, bpp) = crate::backend::vulkan::engine::read_resident_storage(
+            &candidate.key,
+            candidate.seed_generation,
+        )
+        .map_err(|e| {
+            crate::observe::Emit::decline("graphics_storage_seed", &e)
+                .field("binding", binding)
+                .fail();
+            ComputeStatus::MissingTexture("graphics_storage_resident_seed_lost")
+        })?;
+        if Some(bpp) != pixel_format::bytes_per_pixel(texture.pixel_format)
+            || bytes.len() != texture.bytes.len()
+        {
+            return Err(ComputeStatus::Unsupported(
+                "graphics_storage_resident_seed_layout",
+            ));
+        }
+        texture.bytes = bytes;
+        texture.seed_skipped = false;
+    }
+    let mapping_generation = match &texture.writeback {
+        TextureWriteback::Type11 { mapping_id, .. } => Some((
+            *mapping_id,
+            state
+                .mappings
+                .get(mapping_id)
+                .ok_or(ComputeStatus::GuestIo("graphics_storage_mapping_gone"))?
+                .map_generation,
+        )),
+        _ => None,
+    };
+    Ok(GraphicsStagedTexture {
+        texture,
+        physical_spans,
+        mapping_generation,
+    })
+}
+
+#[cfg(feature = "backend-vulkan")]
+impl GraphicsStagedTexture {
+    pub(crate) fn overlaps(&self, other: &Self) -> bool {
+        self.physical_spans
+            .iter()
+            .any(|&(a, b)| other.physical_spans.iter().any(|&(c, d)| a < d && c < b))
+    }
+
+    pub(crate) fn writeback<M: HostMemory + HostOps>(
+        &mut self,
+        state: &mut DeviceState,
+        host: &mut M,
+        task_id: u32,
+        bytes: Vec<u8>,
+    ) -> Result<(), ComputeStatus> {
+        let expected = (self.texture.width as usize)
+            .checked_mul(self.texture.height as usize)
+            .and_then(|n| {
+                n.checked_mul(
+                    pixel_format::bytes_per_pixel(self.texture.pixel_format).unwrap_or(0) as usize,
+                )
+            })
+            .ok_or(ComputeStatus::GuestIo("graphics_storage_readback_layout"))?;
+        if bytes.len() != expected || expected == 0 {
+            return Err(ComputeStatus::GuestIo("graphics_storage_readback_layout"));
+        }
+        let now = graphics_backing_spans(state, host, task_id, &self.texture.writeback)?;
+        if self.mapping_generation.is_some_and(|(id, generation)| {
+            state.mappings.get(&id).map(|m| m.map_generation) != Some(generation)
+        }) {
+            return Err(ComputeStatus::GuestIo("graphics_storage_mapping_replaced"));
+        }
+        if now != self.physical_spans {
+            return Err(ComputeStatus::GuestIo("graphics_storage_backing_changed"));
+        }
+        self.texture.bytes = bytes;
+        writeback_texture(state, host, task_id, &self.texture)
+    }
+}
+
 #[cfg(feature = "backend-vulkan")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ComputeStorageResidencyCandidate {
@@ -3847,7 +4016,7 @@ fn mtl_to_engine_sampled(
 }
 
 #[cfg(feature = "backend-vulkan")]
-fn spirv_image_format_to_engine_storage(
+pub(crate) fn spirv_image_format_to_engine_storage(
     format: crate::runtime::spirv_bind::ImageFormat,
 ) -> Option<crate::backend::vulkan::engine::StorageImageFormat> {
     use crate::backend::vulkan::engine::StorageImageFormat as V;
@@ -3898,7 +4067,7 @@ fn guest_numeric_class(guest: crate::backend::vulkan::engine::StorageImageFormat
 }
 
 #[cfg(feature = "backend-vulkan")]
-fn specialized_storage_image_format(
+pub(crate) fn specialized_storage_image_format(
     guest: crate::backend::vulkan::engine::StorageImageFormat,
     shader: crate::runtime::spirv_bind::ImageFormat,
     write_without_format: bool,

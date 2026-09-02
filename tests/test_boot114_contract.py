@@ -55,3 +55,57 @@ class Boot114ContractTests(unittest.TestCase):
         self.assertEqual(current['MACVM_GDB_PORT'], '12352')
         self.assertEqual(current['MACVM_QEMU_BIN'], '/home/macvm/src/macvm/build/qemu-boot116-attachments/qemu-system-aarch64')
         self.assertEqual(current['VK_INSTANCE_LAYERS'], 'VK_LAYER_KHRONOS_validation')
+
+    def test_boot117_changes_only_verified_binary_storage_and_run_identity(self):
+        scripts = Path(__file__).resolve().parents[1] / 'scripts'
+        def settings(name):
+            text = (scripts / name).read_text()
+            tokens = shlex.split(text.replace('\\\n', ' '), comments=True)
+            return text, dict(t.split('=', 1) for t in tokens if t.startswith(('MACVM_', 'REIMS_', 'VK_')))
+        _, previous = settings('validation-boot116.sh')
+        text, current = settings('validation-boot117.sh')
+        changed = {k for k in previous.keys() | current.keys() if previous.get(k) != current.get(k)}
+        self.assertEqual(changed, {'MACVM_QEMU_BIN', 'MACVM_ISC_IMAGE', 'MACVM_RUN_NAME',
+                                  'MACVM_QEMU_DISPLAY', 'MACVM_GDB_PORT', 'MACVM_QEMU_TIMEOUT'})
+        self.assertEqual(current['MACVM_QEMU_TIMEOUT'], '0s')
+        self.assertEqual(current['MACVM_SMOKE_MEMORY_GIB'], '16')
+        self.assertEqual(current['MACVM_SMOKE_VCPUS'], '8')
+        self.assertIn('refusing to start while another validation ARM guest is running', text)
+        self.assertIn('validation-isc-complete-v4-ean.img', current['MACVM_ISC_IMAGE'])
+
+    def test_boot118_preserves_recovery_inputs_and_limits_renderer_changes(self):
+        scripts = Path(__file__).resolve().parents[1] / 'scripts'
+        def settings(name):
+            text = (scripts / name).read_text()
+            tokens = shlex.split(text.replace('\\\n', ' '), comments=True)
+            return text, dict(t.split('=', 1) for t in tokens if t.startswith(('MACVM_', 'REIMS_', 'VK_')))
+        _, previous = settings('validation-boot117.sh')
+        text, current = settings('validation-boot118.sh')
+        changed = {k for k in previous.keys() | current.keys() if previous.get(k) != current.get(k)}
+        self.assertEqual(changed, {'MACVM_QEMU_BIN', 'MACVM_RUN_NAME', 'MACVM_QEMU_DISPLAY',
+                                  'MACVM_GDB_PORT', 'REIMS_VGPU_CAPTURE_REJECTED_CONTRACTS'})
+        self.assertEqual(current['MACVM_QEMU_BIN'], '/home/macvm/src/macvm/build/qemu-boot118-render-contract/qemu-system-aarch64')
+        self.assertEqual(current['MACVM_QEMU_TIMEOUT'], '0s')
+        self.assertEqual(current['MACVM_SMOKE_VCPUS'], '8')
+        self.assertEqual(current['MACVM_SMOKE_MEMORY_GIB'], '16')
+        self.assertEqual(current['REIMS_VGPU_CAPTURE_REJECTED_CONTRACTS'], 'YES')
+        self.assertIn('refusing to start while another validation ARM guest is running', text)
+
+    def test_boot119_changes_only_tested_binary_and_run_identity(self):
+        scripts = Path(__file__).resolve().parents[1] / 'scripts'
+        def settings(name):
+            text = (scripts / name).read_text()
+            tokens = shlex.split(text.replace('\\\n', ' '), comments=True)
+            return text, dict(t.split('=', 1) for t in tokens if t.startswith(('MACVM_', 'REIMS_', 'VK_')))
+        _, previous = settings('validation-boot118.sh')
+        text, current = settings('validation-boot119.sh')
+        changed = {k for k in previous.keys() | current.keys() if previous.get(k) != current.get(k)}
+        self.assertEqual(changed, {'MACVM_QEMU_BIN', 'MACVM_RUN_NAME', 'MACVM_QEMU_DISPLAY', 'MACVM_GDB_PORT',
+                                  'REIMS_VGPU_FAIL_LOG', 'REIMS_VGPU_DRAW_LOG_PATH'})
+        self.assertEqual(current['MACVM_QEMU_BIN'], '/home/macvm/src/macvm/build/qemu-boot119-graphics-storage/qemu-system-aarch64')
+        self.assertEqual(current['MACVM_QEMU_TIMEOUT'], '0s')
+        self.assertEqual(current['MACVM_GDB_PORT'], '12355')
+        run = '/home/macvm/runs/aux-26.6/' + current['MACVM_RUN_NAME']
+        self.assertEqual(current['REIMS_VGPU_FAIL_LOG'], run + '/reims-fail.log')
+        self.assertEqual(current['REIMS_VGPU_DRAW_LOG_PATH'], run + '/reims-draw.log')
+        self.assertIn('refusing to start while another validation ARM guest is running', text)

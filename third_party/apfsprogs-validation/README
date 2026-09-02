@@ -1,0 +1,33 @@
+
+Apfsprogs is a suite of userland software to work with the Apple File System
+on Linux. It's intended mainly to help test the Linux kernel module that can
+be retrieved from <git://github.com/eafer/linux-apfs-rw.git>. The following
+are included:
+
+  o mkapfs: an experimental filesystem build tool
+  o apfs-snap: a tool to take snapshots of a volume mounted with our module
+  o apfs-label: a tool to list the labels of all volumes in a container
+  o apfsck: a filesystem integrity checker, for now only useful for testers
+
+Usage
+=====
+
+To build any of the tools, just cd to its directory and run
+
+  make
+
+The resulting executable will have the name of the tool, and a man page is
+available under the same directory. If you run
+
+  make install
+
+the files will be copied to the typical locations in the user home folder: the
+binary is placed in ~/bin, and the man page in ~/share/man/man8. You can
+override those paths by setting the BINDIR and MANDIR variables, for example:
+
+  make install BINDIR=/sbin MANDIR=/usr/share/man/man8/
+
+Credits
+=======
+
+Written by Ernesto A. Fernández <ernesto@corellium.com>.

@@ -1,0 +1,16 @@
+Product: macOS Tahoe 26.6
+Build: 25G72
+Filename: UniversalMac_26.6_25G72_Restore.ipsw
+Release date: 2026-07-27
+Apple CDN URL: https://updates.cdn-apple.com/2026SummerFCS/fullrestores/140-65618/10445B26-DE2C-43EC-9149-0A831602E74B/UniversalMac_26.6_25G72_Restore.ipsw
+Exact size: 19772077142 bytes
+SHA-256: a8d59bdec11a16f704c1a41edc86461c77e71c790ac834a05266b9670287142c
+SHA-1: 1bccc2a9710d94f23304bba4d976c94a989beed3
+MD5: 2dba92e72a2945c4fcab85acfeb0ac6d
+Download environment: isolated Ubuntu 24.04 x86_64 VM, 2 vCPU, 8 GiB RAM
+Download method: aria2 1.37.0, 8 HTTP range connections, resumable, no P2P
+Average observed download speed: approximately 23 MiB/s
+Verification: exact size PASS; SHA-256 PASS; ZIP central directory PASS
+Internal Restore.plist: ProductVersion=26.6; ProductBuildVersion=25G72; includes VirtualMac2,1
+Compatibility status: cached only; not booted or installed by this Linux/QEMU project
+

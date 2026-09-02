@@ -33,6 +33,7 @@ mod retry;
 mod spirv_binary;
 mod spirv_module;
 mod spirv_operand;
+mod spirv_references;
 mod spirv_variable_ptr;
 pub mod tools;
 pub(crate) mod types;
@@ -40,6 +41,7 @@ pub(crate) mod types;
 pub use fc_specialize::{specialize_function_constants, specialize_function_constants_zero};
 pub use passthrough::translate_passthrough;
 use primary_retry::*;
+pub use spirv_references::{spirv_instruction_references, InstructionReferences};
 
 use crate::spirv_module::{load_bytes as load_owned_module, Module};
 use std::path::Path;

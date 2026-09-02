@@ -1,4 +1,24 @@
-# 2026-09-02 开发备份
+# 开发备份
+
+## 2026-09-03：Boot119 安装界面成功检查点
+
+新的开发分支为 `dev/boot119-installer-20260903`，Release 标签为
+`backup-20260903-boot119`。不覆盖旧分支，不 force-push。
+本次保存最新源码、脚本、回归用例、截图、验收结论、成功二进制和对应测试/构建记录。
+详细边界见 [Boot119 Release 清单](BOOT119-RELEASE-NOTES.md)。
+
+后台控制器 `push-boot119-background.sh <固定commit>` 使用本机已授权的 GitHub
+账户推送，并仅在隔离验证 VM 内打包已有文件；不会编译、测试、安装或停止 VM。
+状态落在被 Git 忽略的 `release-staging/backup-20260903-boot119/`：
+`CODE_PUSHED` 表示代码已核对远端 commit；`COMPLETE` 表示所有本次制品均已核对
+远端 SHA-256 和大小；`RESULT` 记录退出码。仅启动后台任务不代表上传已完成。
+
+新增 APFS 格式化工具包含实际修改后的源码及许可证，不以空 gitlink 代替源码。
+其原始 Git 元数据保存在本地忽略目录下，上游 commit 为
+`3721463ba7f539e532907bc1d10ed5b9a97d0449`。
+不上传运行中的磁盘、Apple 操作系统材料、认证票据或生产配置。
+
+## 2026-09-02：历史 Boot116 备份记录
 
 目标仓库：`git@github.com:bjzhangshuai/arm-hackintosh.git`
 

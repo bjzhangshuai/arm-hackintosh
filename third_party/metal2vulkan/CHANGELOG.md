@@ -35,6 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Remove unused non-volatile direct descriptor-handle loads before interface liveness and global
+  cleanup, so unused AIR texture/sampler arguments do not require bound Vulkan descriptors.
 - Unsupported Metal visible function references now fail fast with an explicit fallback instead of
   being treated as ordinary functions.
 - Multiple `OpReturnValue` sites are rewritten consistently to stage outputs, and undefined

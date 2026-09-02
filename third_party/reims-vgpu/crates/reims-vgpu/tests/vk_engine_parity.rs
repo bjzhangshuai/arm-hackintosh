@@ -73,6 +73,558 @@ fn triangle_spirv() -> (Vec<u32>, Vec<u32>) {
     )
 }
 
+fn contract_fragment(name: &str) -> Vec<u32> {
+    contract_fragment_options(name, &[])
+}
+
+fn contract_fragment_options(name: &str, options: &[String]) -> Vec<u32> {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name);
+    let output =
+        std::env::temp_dir().join(format!("reims-contract-{}-{name}.spv", std::process::id()));
+    let status = std::process::Command::new("glslc")
+        .args(options)
+        .arg("--target-env=vulkan1.2")
+        .arg(&source)
+        .arg("-o")
+        .arg(&output)
+        .status()
+        .expect("descriptor regression requires glslc");
+    assert!(status.success(), "compile descriptor fixture {name}");
+    let bytes = std::fs::read(&output).expect("compiled fixture");
+    std::fs::remove_file(&output).expect("remove owned fixture output");
+    bytes
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .collect()
+}
+
+fn contract_texture() -> SampledImageResource {
+    SampledImageResource {
+        binding: 32,
+        width: 1,
+        height: 1,
+        layers: 1,
+        arrayed: false,
+        volume: false,
+        cube: false,
+        one_dim: false,
+        source: SampledSource::Bytes(std::sync::Arc::new(vec![255, 0, 0, 255])),
+        format: ash::vk::Format::R8G8B8A8_UNORM,
+        identity: None,
+        swizzle: Default::default(),
+    }
+}
+
+#[test]
+fn graphics_storage_native_pixels_readwrite_and_skip_color_readback() {
+    use engine::{GraphicsStorageImageResource, StorageImageFormat as F};
+    let _g = engine_test_session();
+    let v = contract_fragment("graphics_storage.vert");
+    // Non-8-bit values catch accidental RGBA8 conversion. All texels outside
+    // the shader's write rectangle must preserve their native seed bytes.
+    for (format, qualifier, texel, integer) in [
+        (
+            F::Rgba16Float,
+            "rgba16f",
+            [0xc000u16, 0x3800, 0x4280, 0x3c00]
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+            false,
+        ),
+        (
+            F::Rg16Float,
+            "rg16f",
+            [0xc000u16, 0x3800]
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect(),
+            false,
+        ),
+        (
+            F::Rgba32Float,
+            "rgba32f",
+            [-2.0f32, 0.5, 3.25, 1.0]
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect(),
+            false,
+        ),
+        (F::R32Uint, "r32ui", 1000u32.to_le_bytes().to_vec(), true),
+        (
+            F::Rgba16Uint,
+            "rgba16ui",
+            [1000u16, 2000, 3000, 4000]
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect(),
+            true,
+        ),
+    ] {
+        let mut options = vec![format!("-DFORMAT={qualifier}")];
+        if integer {
+            options.push("-DUINT_IMAGE".into());
+        }
+        for read_seed in [false, true] {
+            if read_seed {
+                options.push("-DREAD_SEED".into());
+            }
+            let f = contract_fragment_options("graphics_storage.frag", &options);
+            let seed_texel = if read_seed {
+                texel.clone()
+            } else {
+                vec![0; texel.len()]
+            };
+            let expected = if !read_seed {
+                texel.clone()
+            } else {
+                match format {
+                    F::Rgba16Float | F::Rg16Float => texel
+                        .chunks_exact(2)
+                        .flat_map(|v| {
+                            (u16::from_le_bytes(v.try_into().unwrap()) + 0x400).to_le_bytes()
+                        })
+                        .collect(),
+                    F::Rgba32Float => texel
+                        .chunks_exact(4)
+                        .flat_map(|v| {
+                            (f32::from_le_bytes(v.try_into().unwrap()) * 2.0).to_le_bytes()
+                        })
+                        .collect(),
+                    F::R32Uint => (2000u32).to_le_bytes().to_vec(),
+                    F::Rgba16Uint => [2000u16, 4000, 6000, 8000]
+                        .into_iter()
+                        .flat_map(u16::to_le_bytes)
+                        .collect(),
+                    _ => unreachable!(),
+                }
+            };
+            for skip in [false, true] {
+                for _ in 0..3 {
+                    // repeated pool reuse/fence retirement
+                    let mut req = engine_req(&v, &f, 4, 3);
+                    req.vertex_count = 3;
+                    req.skip_readback = skip;
+                    req.storage_images.push(GraphicsStorageImageResource {
+                        binding: 163,
+                        format,
+                        width: 4,
+                        height: 3,
+                        bytes: seed_texel.repeat(12),
+                    });
+                    let out =
+                        engine::execute_draw_request(&req).expect("native graphics storage draw");
+                    assert_eq!(out.pixels.is_empty(), skip);
+                    assert_eq!(out.storage_images.len(), 1);
+                    for y in 0..3 {
+                        for x in 0..4 {
+                            let offset = (y * 4 + x) * texel.len();
+                            let got = &out.storage_images[0][offset..offset + texel.len()];
+                            if x == 0 || y == 0 {
+                                assert_eq!(got, seed_texel);
+                            } else {
+                                assert_eq!(got, expected, "{format:?}, skip={skip}, ({x},{y})");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn graphics_storage_rejects_wrong_format_shape_bytes_and_binding_collisions() {
+    use engine::{GraphicsStorageImageResource, StorageImageFormat as F};
+    let _g = engine_test_session();
+    let v = contract_fragment("graphics_storage.vert");
+    let f = contract_fragment("graphics_storage.frag");
+    for bad in 0..5 {
+        let mut req = engine_req(&v, &f, 4, 3);
+        let mut image = GraphicsStorageImageResource {
+            binding: 163,
+            format: F::Rgba16Float,
+            width: 4,
+            height: 3,
+            bytes: vec![0; 96],
+        };
+        match bad {
+            0 => {
+                image.format = F::Rgba8Unorm;
+                image.bytes.resize(48, 0);
+            }
+            1 => {
+                image.format = F::Rgba16Uint;
+            }
+            2 => {
+                image.bytes.pop();
+            }
+            3 => {
+                image.width = 0;
+            }
+            4 => {
+                let mut sampled = contract_texture();
+                sampled.binding = 163;
+                req.sampled_images.push(sampled);
+            }
+            _ => unreachable!(),
+        }
+        req.storage_images.push(image);
+        assert!(
+            engine::execute_draw_request(&req).is_err(),
+            "invalid storage case {bad}"
+        );
+    }
+}
+
+#[test]
+fn graphics_storage_bgra_write_formatless_preserves_channel_order() {
+    use engine::{GraphicsStorageImageResource, StorageImageFormat};
+    use reims_vgpu::runtime::spirv_bind::{self, ImageFormat};
+    let _g = engine_test_session();
+    let v = contract_fragment("graphics_storage.vert");
+    let mut f = contract_fragment("graphics_storage.frag");
+    // Exercise the product specialization and capability insertion, not just
+    // a shader compiler that already emits the right capability for us.
+    assert_eq!(
+        spirv_bind::specialize_image_formats(&mut f, &[(163, ImageFormat::Unknown)]),
+        Ok(1)
+    );
+    assert!(spirv_bind::ensure_storage_write_without_format_capability(
+        &mut f
+    ));
+    assert!(!spirv_bind::ensure_storage_write_without_format_capability(
+        &mut f
+    ));
+    let mut req = engine_req(&v, &f, 4, 3);
+    req.vertex_count = 3;
+    req.storage_images.push(GraphicsStorageImageResource {
+        binding: 163,
+        format: StorageImageFormat::Bgra8Unorm,
+        width: 4,
+        height: 3,
+        bytes: vec![17; 48],
+    });
+    let out = engine::execute_draw_request(&req).expect("BGRA format-less graphics write");
+    for y in 0..3 {
+        for x in 0..4 {
+            let got = &out.storage_images[0][(y * 4 + x) * 4..(y * 4 + x + 1) * 4];
+            if x == 0 || y == 0 {
+                assert_eq!(got, [17, 17, 17, 17]);
+            } else {
+                assert_eq!(got, [255, 128, 0, 255]);
+            }
+        }
+    }
+}
+
+#[test]
+fn graphics_storage_framebuffer_fetch_and_mrt_store_survive_skipped_color_readback() {
+    use engine::{GraphicsStorageImageResource, StorageImageFormat};
+    let _g = engine_test_session();
+    let v = contract_fragment("graphics_storage.vert");
+    for (format, options, texel) in [
+        (
+            StorageImageFormat::Rgba16Float,
+            vec![],
+            // Source is UNORM8: clear 0.5 quantizes to 128/255 before
+            // framebuffer fetch, whose nearest binary16 value is 0x3804.
+            [0u16, 0x3804, 0x3c00, 0x3c00]
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        ),
+        (
+            StorageImageFormat::Bgra8Unorm,
+            vec!["-DFORMATLESS".into()],
+            vec![255, 128, 0, 255],
+        ),
+        (
+            StorageImageFormat::Bgra8Unorm,
+            vec!["-DFORMATLESS".into(), "-DNARROW_TYPES".into()],
+            vec![255, 128, 0, 255],
+        ),
+    ] {
+        let f = contract_fragment_options("graphics_storage_fetch.frag", &options);
+        for mrt in [false, true] {
+            for skip in [false, true] {
+                let mut req = engine_req(&v, &f, 4, 3);
+                req.color_input = true;
+                req.target_clear = [0.0, 0.5, 1.0, 1.0];
+                req.skip_readback = skip;
+                req.target_identity = Some(TargetIdentity::Anonymous { slot: 9876 });
+                req.storage_images.push(GraphicsStorageImageResource {
+                    binding: 163,
+                    format,
+                    width: 4,
+                    height: 3,
+                    bytes: vec![0; 12 * texel.len()],
+                });
+                if mrt {
+                    req.secondary_targets.push(SecondaryColorTarget {
+                        identity: TargetIdentity::Anonymous { slot: 9877 },
+                        width: 4,
+                        height: 3,
+                        format: ash::vk::Format::R16G16B16A16_SFLOAT,
+                        clear: [-2.0, 0.5, 3.25, 1.0],
+                        load: false,
+                        blend: None,
+                        color_write_mask: Default::default(),
+                    });
+                }
+                let out = engine::execute_draw_request(&req)
+                    .expect("framebuffer fetch -> graphics storage");
+                assert_eq!(out.pixels.is_empty(), skip);
+                assert_eq!(out.storage_images[0], texel.repeat(12));
+            }
+        }
+    }
+}
+
+#[test]
+fn graphics_storage_vertex_and_fragment_keep_independent_native_outputs() {
+    use engine::{GraphicsStorageImageResource, StorageImageFormat};
+    let _g = engine_test_session();
+    let v = contract_fragment_options("graphics_storage.vert", &["-DVERTEX_STORE".into()]);
+    let f = contract_fragment("graphics_storage.frag");
+    let mut req = engine_req(&v, &f, 4, 3);
+    req.skip_readback = true;
+    for binding in [35, 163] {
+        req.storage_images.push(GraphicsStorageImageResource {
+            binding,
+            format: StorageImageFormat::Rgba16Float,
+            width: 4,
+            height: 3,
+            bytes: vec![0; 96],
+        });
+    }
+    let out =
+        engine::execute_draw_request(&req).expect("two graphics stages with independent storage");
+    assert!(out.pixels.is_empty());
+    assert_eq!(out.storage_images.len(), 2);
+    let vertex_texel = [0xc000u16, 0x3800, 0x4280, 0x3c00]
+        .into_iter()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    assert_eq!(&out.storage_images[0][..24], vertex_texel.repeat(3));
+    assert_eq!(&out.storage_images[0][24..], &[0; 72]);
+    // Fragment writes skip the top row and left column, leaving the vertex
+    // image and every untouched fragment destination byte independent.
+    for y in 0..3 {
+        for x in 0..4 {
+            let texel = &out.storage_images[1][(y * 4 + x) * 8..(y * 4 + x + 1) * 8];
+            assert_eq!(texel.iter().any(|v| *v != 0), x > 0 && y > 0);
+        }
+    }
+}
+
+#[test]
+fn rg16_uint_texture_fetch_preserves_integer_values_above_255() {
+    let _g = engine_test_session();
+    let (v, _) = triangle_spirv();
+    let f = contract_fragment("descriptor_rg16uint.frag");
+    let mut req = engine_req(&v, &f, 4, 4);
+    let mut tex = contract_texture();
+    tex.width = 3;
+    tex.format = ash::vk::Format::R16G16_UINT;
+    tex.source = SampledSource::Bytes(std::sync::Arc::new(
+        [0u16, 1, 255, 256, 32768, 65535]
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect(),
+    ));
+    req.sampled_images.push(tex);
+    // Integer images cannot use the helper's linear-filter default.
+    let mut sampler = SamplerResource::normalized_default(64);
+    sampler.min_filter = engine::SamplerFilter::Nearest;
+    sampler.mag_filter = engine::SamplerFilter::Nearest;
+    req.samplers.push(sampler);
+    let out = engine::execute_draw_request(&req).expect("native RG16Uint draw");
+    assert_fullscreen_fragment_color("RG16Uint integer fetch", &semantic_rgba(&out), 4, 4);
+}
+
+#[test]
+fn mrt_fetch_all_secondary_slots_clear_load_formats_and_primary_composition() {
+    let _g = engine_test_session();
+    let (v, f) = triangle_spirv();
+    for slot in 1..8u32 {
+        for primary_fetch in [false, true] {
+            let fetch = contract_fragment_options(
+                "descriptor_mrt_fetch.frag",
+                &[
+                    format!("-DSECONDARY_SLOT={slot}"),
+                    format!("-DREAD_PRIMARY={}", u8::from(primary_fetch)),
+                ],
+            );
+            for format in [
+                ash::vk::Format::R8G8B8A8_UNORM,
+                ash::vk::Format::R16G16_SFLOAT,
+                ash::vk::Format::R16G16B16A16_SFLOAT,
+            ] {
+                for load in [false, true] {
+                    let mut req = engine_req(&v, &f, 4, 4);
+                    // Exercise both pooled and resident primary paths, and
+                    // composition with a depth attachment appended last.
+                    if primary_fetch {
+                        req.target_identity = Some(TargetIdentity::Gva {
+                            gva: 0x90000,
+                            width: 4,
+                            height: 4,
+                            generation: 1,
+                        });
+                        req.depth = Some(DepthState {
+                            test_enable: true,
+                            write_enable: true,
+                            compare: SamplerCompareFunction::Always,
+                            clear_value: 1.0,
+                            load: false,
+                            stencil: None,
+                        });
+                    }
+                    req.target_clear = [0.25, 0.0, 0.0, 1.0];
+                    for i in 1..=slot {
+                        req.secondary_targets.push(SecondaryColorTarget {
+                            identity: TargetIdentity::Gva {
+                                gva: 0x100000 + i as u64 * 0x10000,
+                                width: 4,
+                                height: 4,
+                                generation: 1,
+                            },
+                            width: 4,
+                            height: 4,
+                            format,
+                            clear: [0.0, 0.5, 0.75, 1.0],
+                            load: false,
+                            blend: None,
+                            color_write_mask: Default::default(),
+                        });
+                    }
+                    if load {
+                        req.vertex_count = 0;
+                        engine::execute_draw_request(&req)
+                            .expect("seed secondary with clear-only render pass");
+                        for sec in &mut req.secondary_targets {
+                            sec.load = true;
+                            sec.clear = [0.0; 4];
+                        }
+                    }
+                    req.vertex_count = 3;
+                    req.frag_spirv = std::sync::Arc::new(fetch.clone());
+                    req.color_input = primary_fetch;
+                    req.secondary_color_inputs = if primary_fetch {
+                        ((1u16 << (slot + 1)) - 2) as u8
+                    } else {
+                        1 << slot
+                    };
+                    let out = engine::execute_draw_request(&req).unwrap_or_else(|e|
+                        panic!("slot={slot} format={format:?} load={load} primary={primary_fetch}: {e}"));
+                    assert_fullscreen_fragment_color(
+                        "MRT fetch contract",
+                        &semantic_rgba(&out),
+                        4,
+                        4,
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn mrt_fetch_rejects_unattached_and_uninitialized_load_sources() {
+    let _g = engine_test_session();
+    let (v, f) = triangle_spirv();
+    let mut req = engine_req(&v, &f, 4, 4);
+    for mask in [1, 2, 128] {
+        req.secondary_color_inputs = mask;
+        assert!(matches!(
+            engine::execute_draw_request(&req),
+            Err(engine::DrawError::DescriptorContract(_))
+        ));
+    }
+    req.secondary_color_inputs = 2;
+    req.secondary_targets.push(SecondaryColorTarget {
+        identity: TargetIdentity::Gva {
+            gva: 0x200000,
+            width: 4,
+            height: 4,
+            generation: 1,
+        },
+        width: 4,
+        height: 4,
+        format: ash::vk::Format::R16G16_SFLOAT,
+        clear: [0.0; 4],
+        load: true,
+        blend: None,
+        color_write_mask: Default::default(),
+    });
+    assert!(matches!(
+        engine::execute_draw_request(&req),
+        Err(engine::DrawError::DrawExecution(
+            engine::DrawExecutionDecline::LoadTargetContentNotReady { .. }
+        ))
+    ));
+}
+
+#[test]
+fn descriptor_contract_rejects_missing_and_mistyped_before_creating_gpu_objects() {
+    use engine::descriptor_contract::DescriptorContractDecline as D;
+    let _g = engine_test_session();
+    let (v, _) = triangle_spirv();
+    let f = contract_fragment("descriptor_sampled.frag");
+    let mut req = engine_req(&v, &f, 2, 2);
+    let before = engine::counter_snapshot();
+    assert!(matches!(
+        engine::execute_draw_request(&req),
+        Err(engine::DrawError::DescriptorContract(D::Missing {
+            binding: 32,
+            ..
+        }))
+    ));
+    req.sampled_images.push(contract_texture());
+    assert!(matches!(
+        engine::execute_draw_request(&req),
+        Err(engine::DrawError::DescriptorContract(D::Missing {
+            binding: 64,
+            ..
+        }))
+    ));
+    req.samplers.push(SamplerResource::normalized_default(64));
+    req.frag_spirv = std::sync::Arc::new(contract_fragment("descriptor_storage.frag"));
+    assert!(matches!(
+        engine::execute_draw_request(&req),
+        Err(engine::DrawError::DescriptorContract(D::Type {
+            shader: ash::vk::DescriptorType::STORAGE_IMAGE,
+            ..
+        }))
+    ));
+    assert_eq!(
+        engine::counter_snapshot().delta_since(&before).creates,
+        0,
+        "invalid descriptors must not reach Vulkan"
+    );
+}
+
+#[test]
+fn descriptor_contract_valid_binding_renders_and_shape_mismatch_rejects() {
+    use engine::descriptor_contract::DescriptorContractDecline as D;
+    let _g = engine_test_session();
+    let (v, _) = triangle_spirv();
+    let f = contract_fragment("descriptor_sampled.frag");
+    let mut req = engine_req(&v, &f, 2, 2);
+    req.sampled_images.push(contract_texture());
+    req.samplers.push(SamplerResource::normalized_default(64));
+    let pixels = engine::execute_draw_request(&req).expect("actual descriptor-backed draw");
+    assert_eq!(semantic_rgba(&pixels), [255, 0, 0, 255].repeat(4));
+    req.sampled_images[0].one_dim = true;
+    assert!(matches!(
+        engine::execute_draw_request(&req),
+        Err(engine::DrawError::DescriptorContract(D::ImageShape { .. }))
+    ));
+}
+
 fn skip_if_no_gpu(err: &str) -> bool {
     let lower = err.to_ascii_lowercase();
     lower.contains("no vulkan")

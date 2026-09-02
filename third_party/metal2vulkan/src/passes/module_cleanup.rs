@@ -64,6 +64,74 @@ pub(super) fn function_referenced_ids(module: &Module) -> HashSet<Word> {
     s
 }
 
+/// Interface lowering materializes descriptor handles even for unused AIR arguments. An unused
+/// handle load is not an image read, but leaving it in the function makes Vulkan require a bound
+/// descriptor. Remove only direct, unqualified, unused UniformConstant opaque-handle loads before
+/// computing interface liveness. Image operations, escaped handles, indirect loads, and memory
+/// access operands are deliberately outside this narrow cleanup.
+pub(super) fn drop_unused_descriptor_loads(module: &mut Module) {
+    // Conservatively preserve modules with volatile decorations (including decoration groups).
+    // A load without a MemoryAccess operand is not sufficient proof of non-volatility there.
+    if module.annotations.iter().any(|inst| {
+        inst.operands
+            .contains(&Operand::Decoration(Decoration::Volatile))
+    }) {
+        return;
+    }
+    let opaque_types: HashSet<Word> = module
+        .types_global_values
+        .iter()
+        .filter(|inst| {
+            matches!(
+                inst.class.opcode,
+                Op::TypeImage | Op::TypeSampler | Op::TypeSampledImage
+            )
+        })
+        .filter_map(|inst| inst.result_id)
+        .collect();
+    let descriptor_pointers: HashMap<Word, Word> = module
+        .types_global_values
+        .iter()
+        .filter(|inst| inst.class.opcode == Op::TypePointer)
+        .filter_map(|inst| match inst.operands.as_slice() {
+            [Operand::StorageClass(StorageClass::UniformConstant), Operand::IdRef(pointee)]
+                if opaque_types.contains(pointee) =>
+            {
+                Some((inst.result_id?, *pointee))
+            }
+            _ => None,
+        })
+        .collect();
+    let descriptors: HashMap<Word, Word> = module
+        .types_global_values
+        .iter()
+        .filter(|inst| {
+            inst.class.opcode == Op::Variable
+                && inst.operands.first()
+                    == Some(&Operand::StorageClass(StorageClass::UniformConstant))
+        })
+        .filter_map(|inst| {
+            Some((
+                inst.result_id?,
+                *descriptor_pointers.get(&inst.result_type?)?,
+            ))
+        })
+        .collect();
+    let used = function_referenced_ids(module);
+    for block in module.functions.iter_mut().flat_map(|f| &mut f.blocks) {
+        block.instructions.retain(|inst| {
+            let [Operand::IdRef(pointer)] = inst.operands.as_slice() else {
+                return true;
+            };
+            !(inst.class.opcode == Op::Load
+                && inst.result_id.is_some_and(|id| !used.contains(&id))
+                && inst
+                    .result_type
+                    .is_some_and(|ty| descriptors.get(pointer) == Some(&ty)))
+        });
+    }
+}
+
 /// Remove global variables that are no longer referenced by code and no longer listed on the filtered
 /// entry interface. Decorations/debug names for the removed ids are swept by drop_dangling_debug.
 pub(super) fn drop_dead_unreferenced_variables(
@@ -588,6 +656,152 @@ mod tests {
     use super::*;
     use crate::spirv_module::Module;
     use crate::spirv_module::ModuleHeader;
+
+    fn descriptor_load_fixture(opaque_op: Op) -> Module {
+        let mut module = Module::new();
+        module.header = Some(ModuleHeader::new(30));
+        module.types_global_values = vec![
+            Instruction::new(opaque_op, None, Some(1), vec![]),
+            Instruction::new(
+                Op::TypePointer,
+                None,
+                Some(2),
+                vec![
+                    Operand::StorageClass(StorageClass::UniformConstant),
+                    Operand::IdRef(1),
+                ],
+            ),
+            Instruction::new(
+                Op::Variable,
+                Some(2),
+                Some(3),
+                vec![Operand::StorageClass(StorageClass::UniformConstant)],
+            ),
+        ];
+        let mut function = Function::new();
+        let mut block = Block::new();
+        block.instructions.push(Instruction::new(
+            Op::Load,
+            Some(1),
+            Some(4),
+            vec![Operand::IdRef(3)],
+        ));
+        function.blocks.push(block);
+        module.functions.push(function);
+        module
+    }
+
+    #[test]
+    fn dead_descriptor_loads_drop_handles_and_dangling_global_metadata() {
+        for opaque_op in [Op::TypeImage, Op::TypeSampler, Op::TypeSampledImage] {
+            let mut module = descriptor_load_fixture(opaque_op);
+            module.annotations.push(Instruction::new(
+                Op::Decorate,
+                None,
+                None,
+                vec![
+                    Operand::IdRef(3),
+                    Operand::Decoration(Decoration::Binding),
+                    Operand::LiteralBit32(17),
+                ],
+            ));
+            module.debug_names.push(Instruction::new(
+                Op::Name,
+                None,
+                None,
+                vec![
+                    Operand::IdRef(4),
+                    Operand::LiteralString("unused_handle".into()),
+                ],
+            ));
+            drop_unused_descriptor_loads(&mut module);
+            assert!(module.functions[0].blocks[0].instructions.is_empty());
+            let refs = function_referenced_ids(&module);
+            let mut ctx = Ctx::new(module);
+            drop_dead_unreferenced_variables(&mut ctx, &refs, &HashSet::new());
+            drop_dangling_debug(&mut ctx);
+            gc_dead_globals(&mut ctx);
+            assert!(ctx.module.types_global_values.is_empty());
+            assert!(ctx.module.annotations.is_empty());
+            assert!(ctx.module.debug_names.is_empty());
+        }
+    }
+
+    #[test]
+    fn dead_descriptor_loads_keep_used_and_escaped_handles() {
+        for consumer in [
+            Op::ImageFetch,
+            Op::ImageQuerySizeLod,
+            Op::ImageWrite,
+            Op::CopyObject,
+            Op::FunctionCall,
+            Op::Phi,
+        ] {
+            let mut module = descriptor_load_fixture(Op::TypeImage);
+            // Use in a different block: this must not be a block-local liveness test.
+            let mut block = Block::new();
+            block.instructions.push(Instruction::new(
+                consumer,
+                None,
+                None,
+                vec![Operand::IdRef(4)],
+            ));
+            module.functions[0].blocks.push(block);
+            drop_unused_descriptor_loads(&mut module);
+            assert_eq!(module.functions[0].blocks[0].instructions.len(), 1);
+            assert_eq!(
+                module.functions[0].blocks[1].instructions[0].class.opcode,
+                consumer
+            );
+        }
+    }
+
+    #[test]
+    fn dead_descriptor_loads_preserve_memory_access_and_volatile_decorations() {
+        let mut module = descriptor_load_fixture(Op::TypeImage);
+        module.functions[0].blocks[0].instructions[0]
+            .operands
+            .push(Operand::MemoryAccess(spirv::MemoryAccess::VOLATILE));
+        drop_unused_descriptor_loads(&mut module);
+        assert_eq!(module.functions[0].blocks[0].instructions.len(), 1);
+        for decorated_id in [1, 2, 3, 20] {
+            let mut module = descriptor_load_fixture(Op::TypeImage);
+            module.annotations.push(Instruction::new(
+                Op::Decorate,
+                None,
+                None,
+                vec![
+                    Operand::IdRef(decorated_id),
+                    Operand::Decoration(Decoration::Volatile),
+                ],
+            ));
+            drop_unused_descriptor_loads(&mut module);
+            assert_eq!(module.functions[0].blocks[0].instructions.len(), 1);
+        }
+    }
+
+    #[test]
+    fn dead_descriptor_loads_preserve_indirect_nonopaque_and_malformed_loads() {
+        let mut cases = Vec::new();
+        let mut indirect = descriptor_load_fixture(Op::TypeImage);
+        indirect.functions[0].blocks[0].instructions[0].operands[0] = Operand::IdRef(19);
+        cases.push(indirect);
+        cases.push(descriptor_load_fixture(Op::TypeInt));
+        let mut wrong_storage = descriptor_load_fixture(Op::TypeImage);
+        wrong_storage.types_global_values[2].operands[0] =
+            Operand::StorageClass(StorageClass::StorageBuffer);
+        cases.push(wrong_storage);
+        let mut mismatched_type = descriptor_load_fixture(Op::TypeImage);
+        mismatched_type.functions[0].blocks[0].instructions[0].result_type = Some(19);
+        cases.push(mismatched_type);
+        let mut missing_result = descriptor_load_fixture(Op::TypeImage);
+        missing_result.functions[0].blocks[0].instructions[0].result_id = None;
+        cases.push(missing_result);
+        for mut module in cases {
+            drop_unused_descriptor_loads(&mut module);
+            assert_eq!(module.functions[0].blocks[0].instructions.len(), 1);
+        }
+    }
 
     #[test]
     fn gc_keeps_local_pointer_store_sentinel_rooted_by_typed_sidecar() {

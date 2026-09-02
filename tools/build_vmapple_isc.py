@@ -44,6 +44,8 @@ PARTITION_START_LBA = AUX_RESERVED_BYTES // SECTOR_SIZE
 ISC_PARTITION_TYPE = uuid.UUID("69646961-6700-11aa-aa11-00306543ecac")
 APFS_VOL_ROLE_NONE = 0x0000
 APFS_VOL_ROLE_XART = 0x0100
+APFS_VOL_ROLE_PREBOOT = 0x0010
+APFS_VOL_ROLE_HARDWARE = 0x0140
 APFS_OBJECT_TYPE_FS = 0x000D
 
 DEFAULT_DISK_UUID = uuid.UUID("af8164aa-893b-5fb9-b41a-9ef75f8863da")
@@ -393,6 +395,28 @@ def _parse_gpt_header(block: bytes, expected_lba: int) -> dict[str, object]:
     }
 
 
+def validate_isc_volumes(superblocks: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Accept the legacy xART-only template or the complete reviewed iSC set."""
+    expected = {APFS_VOL_ROLE_XART: "xART", APFS_VOL_ROLE_PREBOOT: "iSCPreboot",
+                APFS_VOL_ROLE_HARDWARE: "Hardware"}
+    roles = {int(item["role"]) for item in superblocks}
+    if roles not in ({APFS_VOL_ROLE_XART}, set(expected)):
+        raise ISCImageError("iSC APFS volume is not consistently marked as xART or complete iSC")
+    volumes = []
+    seen = set()
+    for role in sorted(roles):
+        copies = [item for item in superblocks if int(item["role"]) == role]
+        ids = {str(item["uuid"]) for item in copies}
+        if len(ids) != 1 or {item["name"] for item in copies} != {expected[role]}:
+            raise ISCImageError("iSC APFS checkpoint metadata is inconsistent")
+        volume_id = next(iter(ids))
+        if volume_id in seen:
+            raise ISCImageError("iSC volume UUID reused across roles")
+        seen.add(volume_id)
+        volumes.append({"uuid": volume_id, "name": expected[role], "role": role})
+    return volumes
+
+
 def inspect_isc_image(image: Path) -> dict[str, object]:
     image = Path(image)
     size = image.stat().st_size
@@ -461,12 +485,8 @@ def inspect_isc_image(image: Path) -> dict[str, object]:
     superblocks = _scan_apfs_volume_superblocks(
         image, base_offset=partition_offset, length=layout["partition_bytes"]
     )
-    if any(int(item["role"]) != APFS_VOL_ROLE_XART for item in superblocks):
-        raise ISCImageError("iSC APFS volume is not consistently marked as xART")
-    volume_uuids = {str(item["uuid"]) for item in superblocks}
-    volume_names = {str(item["name"]) for item in superblocks}
-    if len(volume_uuids) != 1 or volume_names != {"xART"}:
-        raise ISCImageError("iSC APFS checkpoint metadata is inconsistent")
+    volumes = validate_isc_volumes(superblocks)
+    xart = next(item for item in volumes if item["role"] == APFS_VOL_ROLE_XART)
 
     return {
         "size_bytes": size,
@@ -476,10 +496,11 @@ def inspect_isc_image(image: Path) -> dict[str, object]:
         "partition_name": partition_name,
         "partition_start_lba": first_lba,
         "partition_last_lba": last_lba,
-        "apfs_volume_uuid": next(iter(volume_uuids)),
+        "apfs_volume_uuid": xart["uuid"],
         "apfs_volume_name": "xART",
         "apfs_role": APFS_VOL_ROLE_XART,
         "apfs_superblock_count": len(superblocks),
+        "apfs_volumes": volumes,
     }
 
 

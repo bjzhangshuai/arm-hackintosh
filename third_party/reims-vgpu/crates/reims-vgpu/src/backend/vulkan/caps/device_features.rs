@@ -159,6 +159,15 @@ pub struct DeviceFeatures {
     /// Independent per-color-attachment blend state and write masks for MRT.
     /// Optional in core Vulkan; queried and enabled together.
     pub independent_blend: bool,
+    /// Required when the translated stage declares writable storage buffers/images.
+    pub vertex_pipeline_stores_and_atomics: bool,
+    pub fragment_stores_and_atomics: bool,
+    /// Pointer merges emitted by the AIR translator require these optional
+    /// Vulkan 1.1 features, not just an OpCapability declaration.
+    pub variable_pointers_storage_buffer: bool,
+    pub variable_pointers: bool,
+    /// Accessed through EXT so Vulkan 1.2 remains the baseline.
+    pub shader_demote_to_helper_invocation: bool,
     /// `VK_EXT_attachment_feedback_loop_layout`, required for the framebuffer
     /// fetch path that binds attachment 0 both as a color target and as the
     /// fragment shader's input attachment. Without the extension/layout, some
@@ -190,6 +199,8 @@ impl DeviceFeatures {
             .shader_storage_image_write_without_format(self.storage_image_write_without_format)
             .dual_src_blend(self.dual_src_blend)
             .independent_blend(self.independent_blend)
+            .vertex_pipeline_stores_and_atomics(self.vertex_pipeline_stores_and_atomics)
+            .fragment_stores_and_atomics(self.fragment_stores_and_atomics)
     }
 
     /// Without independentBlend every VkPipelineColorBlendAttachmentState
@@ -218,7 +229,10 @@ impl DeviceFeatures {
 
     /// The Vulkan 1.1 features to enable.
     pub fn enabled_vulkan11(&self) -> vk::PhysicalDeviceVulkan11Features<'static> {
-        vk::PhysicalDeviceVulkan11Features::default().storage_buffer16_bit_access(self.storage16)
+        vk::PhysicalDeviceVulkan11Features::default()
+            .storage_buffer16_bit_access(self.storage16)
+            .variable_pointers_storage_buffer(self.variable_pointers_storage_buffer)
+            .variable_pointers(self.variable_pointers && self.variable_pointers_storage_buffer)
     }
 
     /// The Vulkan 1.2 features to enable.
@@ -261,6 +275,13 @@ impl DeviceFeatures {
             .attachment_feedback_loop_layout(self.attachment_feedback_loop_layout)
     }
 
+    pub fn enabled_shader_demote(
+        &self,
+    ) -> vk::PhysicalDeviceShaderDemoteToHelperInvocationFeaturesEXT<'static> {
+        vk::PhysicalDeviceShaderDemoteToHelperInvocationFeaturesEXT::default()
+            .shader_demote_to_helper_invocation(self.shader_demote_to_helper_invocation)
+    }
+
     /// Device extension names this feature set requires, beyond the ones the
     /// interop rails ask for.
     pub fn required_extensions(&self) -> Vec<*const std::os::raw::c_char> {
@@ -270,6 +291,9 @@ impl DeviceFeatures {
         }
         if self.attachment_feedback_loop_layout {
             out.push(vk::EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_NAME.as_ptr());
+        }
+        if self.shader_demote_to_helper_invocation {
+            out.push(vk::EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_NAME.as_ptr());
         }
         out
     }
@@ -289,18 +313,19 @@ pub unsafe fn query(
     pd: vk::PhysicalDevice,
     has_extension: &dyn Fn(&std::ffi::CStr) -> bool,
 ) -> DeviceFeatures {
-    let mut supported_16 = vk::PhysicalDevice16BitStorageFeatures::default();
-    let mut supported_8 = vk::PhysicalDevice8BitStorageFeatures::default();
-    let mut supported_f16i8 = vk::PhysicalDeviceShaderFloat16Int8Features::default();
+    let mut supported_vulkan11 = vk::PhysicalDeviceVulkan11Features::default();
+    let mut supported_demote =
+        vk::PhysicalDeviceShaderDemoteToHelperInvocationFeaturesEXT::default();
     let mut supported_feedback_loop =
         vk::PhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT::default();
     let mut supported_vulkan12 = vk::PhysicalDeviceVulkan12Features::default();
     let mut features2 = vk::PhysicalDeviceFeatures2::default()
-        .push_next(&mut supported_16)
-        .push_next(&mut supported_8)
-        .push_next(&mut supported_f16i8)
+        .push_next(&mut supported_vulkan11)
         .push_next(&mut supported_feedback_loop)
         .push_next(&mut supported_vulkan12);
+    if has_extension(vk::EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_NAME) {
+        features2 = features2.push_next(&mut supported_demote);
+    }
     unsafe { instance.get_physical_device_features2(pd, &mut features2) };
     let supported = features2.features;
     let props = unsafe { instance.get_physical_device_properties(pd) };
@@ -369,6 +394,16 @@ pub unsafe fn query(
         sampler_anisotropy: supported.sampler_anisotropy == vk::TRUE,
         dual_src_blend: supported.dual_src_blend == vk::TRUE,
         independent_blend: supported.independent_blend == vk::TRUE,
+        vertex_pipeline_stores_and_atomics: supported.vertex_pipeline_stores_and_atomics
+            == vk::TRUE,
+        fragment_stores_and_atomics: supported.fragment_stores_and_atomics == vk::TRUE,
+        variable_pointers_storage_buffer: supported_vulkan11.variable_pointers_storage_buffer
+            == vk::TRUE,
+        variable_pointers: supported_vulkan11.variable_pointers == vk::TRUE
+            && supported_vulkan11.variable_pointers_storage_buffer == vk::TRUE,
+        shader_demote_to_helper_invocation: supported_demote.shader_demote_to_helper_invocation
+            == vk::TRUE
+            && has_extension(vk::EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_NAME),
         max_sampler_anisotropy: props.limits.max_sampler_anisotropy.max(1.0),
         max_image_dimension_2d: props
             .limits
@@ -391,10 +426,10 @@ pub unsafe fn query(
             == vk::TRUE,
         bgra8_storage,
         sampled_r32f_linear_filter,
-        storage16: supported_16.storage_buffer16_bit_access == vk::TRUE,
-        storage8: supported_8.storage_buffer8_bit_access == vk::TRUE,
-        float16: supported_f16i8.shader_float16 == vk::TRUE,
-        int8: supported_f16i8.shader_int8 == vk::TRUE,
+        storage16: supported_vulkan11.storage_buffer16_bit_access == vk::TRUE,
+        storage8: supported_vulkan12.storage_buffer8_bit_access == vk::TRUE,
+        float16: supported_vulkan12.shader_float16 == vk::TRUE,
+        int8: supported_vulkan12.shader_int8 == vk::TRUE,
         shader_int64: supported.shader_int64 == vk::TRUE,
         shader_output_viewport_index: supported_vulkan12.shader_output_viewport_index == vk::TRUE,
         mirror_clamp_to_edge,
@@ -434,7 +469,48 @@ mod tests {
             mirror_clamp_to_edge: MirrorClampToEdge::Core12,
             dual_src_blend: true,
             independent_blend: true,
+            vertex_pipeline_stores_and_atomics: true,
+            fragment_stores_and_atomics: true,
+            variable_pointers_storage_buffer: true,
+            variable_pointers: true,
+            shader_demote_to_helper_invocation: false,
             attachment_feedback_loop_layout: false,
+        }
+    }
+
+    #[test]
+    fn shader_feature_enable_matrix_preserves_support_and_dependencies() {
+        for bits in 0..32 {
+            let caps = DeviceFeatures {
+                vertex_pipeline_stores_and_atomics: bits & 1 != 0,
+                fragment_stores_and_atomics: bits & 2 != 0,
+                variable_pointers_storage_buffer: bits & 4 != 0,
+                variable_pointers: bits & 8 != 0,
+                shader_demote_to_helper_invocation: bits & 16 != 0,
+                ..DeviceFeatures::default()
+            };
+            let core = caps.enabled_features();
+            assert_eq!(
+                core.vertex_pipeline_stores_and_atomics == vk::TRUE,
+                bits & 1 != 0
+            );
+            assert_eq!(core.fragment_stores_and_atomics == vk::TRUE, bits & 2 != 0);
+            let v11 = caps.enabled_vulkan11();
+            assert_eq!(
+                v11.variable_pointers_storage_buffer == vk::TRUE,
+                bits & 4 != 0
+            );
+            assert_eq!(v11.variable_pointers == vk::TRUE, bits & 12 == 12);
+            assert_eq!(
+                caps.enabled_shader_demote()
+                    .shader_demote_to_helper_invocation
+                    == vk::TRUE,
+                bits & 16 != 0
+            );
+            assert_eq!(
+                caps.required_extensions().len(),
+                usize::from(bits & 16 != 0)
+            );
         }
     }
 

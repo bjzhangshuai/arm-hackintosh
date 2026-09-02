@@ -1,6 +1,18 @@
 # macOS 26 restore validation on x86_64 Ubuntu 26.04
 
-## Result
+## Current checkpoint (2026-09-03)
+
+Boot119 reaches the real **ARM64 macOS Tahoe 26.6/25G72 installer welcome UI**.
+The QMP capture at 2026-09-03 03:09:33 +0800 shows the artwork, title, instructions
+and Continue button with no stale Recovery contents. Exact ARM64 executable,
+kernel/version evidence and image hashes are recorded in
+[Boot119 installer acceptance](boot119-installer-acceptance.md).
+Boot119 remains running in the isolated x86_64 VM. Installation to disk and a boot
+of the installed system have not been validated. Boot118 exited normally after its
+final evidence was retained; no production QEMU or VM resource was replaced.
+See [BLOCKERS.md](../BLOCKERS.md) for remaining graphics gaps and test gates.
+
+## Historical restore-chain result
 
 The official macOS Tahoe 26.6 `VirtualMac2,1` restore IPSW is genuine and its ARM64 iBootStage2
 payload executes under QEMU TCG on x86_64. The later signed restore-chain experiment reaches

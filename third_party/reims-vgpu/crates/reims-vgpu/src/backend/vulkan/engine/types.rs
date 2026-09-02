@@ -11,6 +11,8 @@ pub use crate::runtime::decode::resource::ColorWriteMask;
 /// Named engine failure. Stable prefixes for observe greps (`vk_engine_*`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DrawError {
+    DescriptorContract(super::descriptor_contract::DescriptorContractDecline),
+    ShaderContract(super::shader_contract::ShaderContractDecline),
     /// Init / ICD / device selection failed (negative-cached).
     Init(super::init_decline::InitDecline),
     /// Understood but declined — a capability this device or this engine does
@@ -51,6 +53,8 @@ pub enum DrawError {
 impl std::fmt::Display for DrawError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::DescriptorContract(d) => write!(f, "vk_engine_descriptor_contract: {d}"),
+            Self::ShaderContract(d) => write!(f, "vk_engine_shader_contract: {d}"),
             Self::Init(d) => write!(f, "vk_engine_init: {d}"),
             Self::Unsupported(r) => write!(f, "vk_engine_unsupported: {r}"),
             Self::Facade(d) => write!(f, "vk_engine_facade: {d}"),
@@ -75,6 +79,8 @@ impl crate::observe::Decline for DrawError {
     /// one event has one reason at every layer.
     fn slug(&self) -> &'static str {
         match self {
+            Self::DescriptorContract(d) => d.slug(),
+            Self::ShaderContract(d) => d.slug(),
             Self::TargetRead(d) => d.slug(),
             Self::Unsupported(r) => r.slug(),
             // Delegates like the two typed variants above: the call names itself,
@@ -95,6 +101,8 @@ impl crate::observe::Decline for DrawError {
 
     fn fields(&self) -> Vec<(&'static str, String)> {
         match self {
+            Self::DescriptorContract(d) => d.fields(),
+            Self::ShaderContract(d) => d.fields(),
             Self::TargetRead(d) => d.fields(),
             Self::Unsupported(r) => r.fields(),
             Self::VkCall(c) => c.fields(),
@@ -238,6 +246,9 @@ pub struct DrawRequest {
     pub vertex_attributes: Vec<VertexAttributeResource>,
     pub storage_buffers: Vec<StorageBufferResource>,
     pub sampled_images: Vec<SampledImageResource>,
+    /// Independent single-layer 2D writable textures. These always return tight
+    /// native-format bytes, even when the colour attachment skips readback.
+    pub storage_images: Vec<GraphicsStorageImageResource>,
     pub samplers: Vec<SamplerResource>,
     /// CPU Load seed for the color target, in the order
     /// [`DrawRequest::target_seed_order`] names.
@@ -269,9 +280,7 @@ pub struct DrawRequest {
     ///
     /// This and `target_rgba8` are the whole load action, and they are ordered:
     /// `load_from_target` wins, else a seed is uploaded, else the attachment
-    /// clears to transparent black. There is no third spelling — the primary
-    /// attachment's `VkClearValue` is `[0, 0, 0, 0]` unconditionally, so a
-    /// "clear to these floats" request could never have been honoured.
+    /// clears to `target_clear` (transparent black by default).
     pub load_from_target: bool,
     /// When true, skip full-frame readback (non-Store / ticket path). Content
     /// remains on the GPU under `target_identity` when provided.
@@ -326,16 +335,19 @@ pub struct DrawRequest {
     pub depth: Option<DepthState>,
     /// Fragment shader reads its destination pixel (Metal framebuffer fetch:
     /// an `air.render_target` INPUT param, translated as a `SubpassData` image
-    /// at [`COLOR_INPUT_BINDING`]). The engine then references attachment 0 as
-    /// a subpass input (GENERAL layout, BY_REGION self-dependency) and writes
-    /// an INPUT_ATTACHMENT descriptor pointing at the color target's view.
+    /// at [`COLOR_INPUT_BINDING`]). The engine reads a same-format pass-before
+    /// snapshot as an input attachment, not the writable color target itself.
     /// `false` (default) keeps the pass byte-identical to the pre-fetch engine.
     pub color_input: bool,
+    /// Framebuffer-fetch inputs for MRT slots 1..7 (bit N means slot N).
+    /// Slot 0 retains `color_input` for existing callers. Each input reads a
+    /// same-format pass-before snapshot, never a writable attachment alias.
+    pub secondary_color_inputs: u8,
 }
 
 /// Descriptor binding of the attachment-0 framebuffer-fetch input attachment.
-/// This is the metal2vulkan ColorInput band base (`dest_N` → `96+N`; only
-/// `dest_0` is supported — see `runtime::spirv_bind::COLOR_INPUT_BINDING_BASE`,
+/// This is the metal2vulkan ColorInput band base (`dest_N` → `96+N`; slots
+/// 0..7 — see `runtime::spirv_bind::COLOR_INPUT_BINDING_BASE`,
 /// kept equal by a unit test there). Both fragment relocations preserve it.
 pub const COLOR_INPUT_BINDING: u32 = 96;
 
@@ -378,6 +390,8 @@ pub struct SecondaryColorTarget {
 #[derive(Debug, Default)]
 pub struct DrawOutput {
     pub pixels: Vec<u8>,
+    /// Writable texture readbacks, in `DrawRequest::storage_images` order.
+    pub storage_images: Vec<Vec<u8>>,
     /// Physical channel order of `pixels`: BGRA8 when true, semantic RGBA8
     /// otherwise. Empty when `skip_readback`, in which case this states the
     /// order the attachment *would* have read back in.
@@ -389,6 +403,18 @@ pub struct DrawOutput {
     /// is the same rule the typed-decline work applies to a `reason=`: the side
     /// that performed the operation says what it did.
     pub pixels_bgra: bool,
+}
+
+/// One resolved, non-aliasing 2D storage view for a graphics draw. Unlike the
+/// compute residency API, this seam always snapshots input and reads output
+/// back synchronously; it never treats placeholder bytes as a valid seed.
+#[derive(Debug)]
+pub struct GraphicsStorageImageResource {
+    pub binding: u32,
+    pub format: StorageImageFormat,
+    pub width: u32,
+    pub height: u32,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug)]

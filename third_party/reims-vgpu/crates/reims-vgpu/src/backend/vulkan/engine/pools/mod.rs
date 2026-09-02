@@ -1751,9 +1751,41 @@ mod staging_mapping_tests {
             back.buffer == slot.buffer || back.buffer == other.buffer,
             "a returned lease must rejoin the free list rather than leak"
         );
+        assert!(
+            pools
+                .readback_multi_live
+                .iter()
+                .any(|s| s.buffer == other.buffer),
+            "acquiring a returned slot must retain the previous live allocation"
+        );
 
         pools.recycle_readback();
         unsafe { pools.destroy_all(&ctx.device) };
+        unsafe { ctx.destroy() };
+    }
+
+    #[test]
+    fn teardown_reclaims_returned_leases_before_draining_free_buffers() {
+        crate::observe::redirect_logs_for_tests();
+        let mut ctx = unsafe { DeviceContext::create() }.expect("Vulkan device");
+        let counters = EngineCounters::default();
+        let mut pools = ResourcePools::new();
+        let first = unsafe { pools.acquire_readback(&ctx, 4096, &counters) }.unwrap();
+        let slot = unsafe { pools.acquire_readback(&ctx, 8192, &counters) }.unwrap();
+        assert_ne!(slot.buffer, first.buffer);
+        assert_eq!(pools.readback_multi_live.len(), 1);
+        assert_eq!(pools.readback_multi_live[0].buffer, first.buffer);
+        if slot.cached {
+            let (token, _) = pools.lease_readback().unwrap();
+            return_readback_lease(token);
+            // No explicit reclaim: teardown owns this returned-token state.
+            assert_eq!(pools.readback_leased.len(), 1);
+        }
+        unsafe { pools.destroy_all(&ctx.device) };
+        assert!(pools.readback_free.values().all(Vec::is_empty));
+        assert!(pools.readback_leased.is_empty());
+        assert!(pools.readback_multi_live.is_empty());
+        assert!(pools.readback_live.is_none());
         unsafe { ctx.destroy() };
     }
 }

@@ -135,7 +135,19 @@ declare { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1), ptr a
     )
     .expect("translate");
     let asm = crate::disassemble(&spv).expect("disassemble");
-    assert!(asm.contains("Binding 64"), "{asm}");
+    // The unused runtime sampler reserves its metadata ABI slot, but no longer leaves a dead
+    // descriptor load in SPIR-V. Live static samplers retain their original numbers and state.
+    assert!(!asm.contains("Binding 64"), "{asm}");
+    assert_eq!(
+        reflection
+            .binding_at(ResourceKind::Sampler, 0)
+            .expect("declared runtime sampler")
+            .descriptor,
+        Some(DescriptorLocation {
+            set: 0,
+            binding: 64
+        }),
+    );
     assert!(asm.contains("Binding 65"), "{asm}");
     assert!(asm.contains("Binding 66"), "{asm}");
     assert!(asm.contains("Binding 96"), "{asm}");

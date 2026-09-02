@@ -358,6 +358,72 @@ fn compute_readonly_ssbo_has_zero_readback() {
     assert_eq!(snap.readback_bytes, 0);
 }
 
+/// Teardown must retire submitted work before destroying cached pipelines.
+/// Run with VK_LAYER_KHRONOS_validation: a functional pass alone cannot detect
+/// VUID-vkDestroyPipeline-pipeline-00765 from the former cache-first teardown.
+#[test]
+fn compute_deferred_submit_then_reset_and_recreate() {
+    let _g = engine_test_session();
+    let Some(words) = assemble_spvasm(&storage_image_write_red_kernel("Rgba8"), "reset_pending")
+    else {
+        return;
+    };
+    let w = 64;
+    let h = 64;
+    let req = ComputeRequest {
+        spirv: words,
+        entry: "main".into(),
+        grid: [w, h, 1],
+        storage_buffers: vec![],
+        sampled_images: vec![],
+        samplers: vec![],
+        storage_images: vec![ComputeStorageImageResource {
+            binding: 0,
+            format: StorageImageFormat::Rgba8Unorm,
+            width: w,
+            height: h,
+            bytes: vec![0; (w * h * 4) as usize],
+            residency: Some(ComputeStorageResidency {
+                identity: ComputeStorageResidencyKey {
+                    mapping_id: 196,
+                    map_generation: 1,
+                    surface_offset: 0,
+                    surface_bpr: w * 4,
+                    span_end: (w * h * 4) as u64,
+                    width: w,
+                    height: h,
+                    pixel_format: 0x46,
+                    texture_ref: 0,
+                },
+                seed_generation: 1,
+                output_generation: 2,
+            }),
+            seed_skipped: false,
+            defer_readback: true,
+        }],
+    };
+    // Exercise normal reset and the device-recreation path with pending work.
+    // No quiesce/readback is allowed between submit and the teardown under test.
+    for poison in [false, true, false] {
+        let Some(out) = engine_or_skip("deferred submit before reset", &req) else {
+            return;
+        };
+        assert_eq!(out.images_deferred, vec![true]);
+        assert_eq!(engine::counter_snapshot().compute_post_wait_skips, 1);
+        if poison {
+            engine::test_poison_and_flush();
+        }
+        engine::test_reset_engine();
+    }
+    let mut synchronous = req;
+    synchronous.storage_images[0].defer_readback = false;
+    let out =
+        engine::execute_compute_request(&synchronous).expect("recreate after pending teardown");
+    assert_eq!(out.images[0].len(), (w * h * 4) as usize);
+    assert!(out.images[0].chunks_exact(4).all(|p| p == [255, 0, 0, 255]));
+    engine::test_reset_engine();
+}
+
 /// 2D grid tiling: proves grid.y is not dropped (GlobalInvocationId.y varies).
 #[test]
 fn compute_2d_grid_tiles_global_invocation_xy() {

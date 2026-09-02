@@ -3,19 +3,18 @@
 在 **x86_64 Linux** 上，通过 **QEMU `qemu-system-aarch64` + TCG** 运行 ARM64 macOS 的实验工程。
 不是 `qemu-arm`（ARM32 用户态模拟），也不是直接使用 KVM 执行 ARM 指令。
 
-## 当前真实进度（2026-09-02）
+## 当前真实进度（2026-09-03）
 
-- macOS 26.6 / 25G72：已启动 ARM64 XNU、RecoveryOS、WindowServer，并显示启动选项界面。
-- Boot115：点击 Options / Continue 后开始启动 Language Chooser，但 Linux Vulkan 渲染器崩溃。
-- 已用独立用例复现 Vulkan render-pass / framebuffer 附件数量不一致，并修复 MRT、framebuffer-fetch、depth 组合及资源释放。
-- Boot116：新构建正在原隔离 VM 中验证。**尚未证明进入 macOS 安装界面，更未完成安装。**
+- **Boot119 已进入 ARM64 macOS Tahoe 26.6 / 25G72 的真实安装欢迎界面。** 2026-09-03 03:09:33（北京时间）的 QMP 截图包含完整 Tahoe 图案、标题、说明和 Continue 按钮；旧窗口内容残留已不再出现。
+- ARM64 XNU、RecoveryOS、WindowServer、语言选择、恢复工具、真实激活与 KeyRecoveryAssistant 均已运行；安装器为 Mach-O arm64，`InstallAssistant` PID 312、`osinstallersetupd` PID 318。版本、哈希、截图和验收边界见 [Boot119 验收记录](docs/boot119-installer-acceptance.md)。**仅通过“进入安装界面”验收，尚未完成磁盘安装或验证安装后启动。**
+- 图形路径修复包含无用描述符加载、可写纹理被当成采样纹理、访问分析误认字面量和能力编号错误，并通过独立回归及本次真实 UI 验证。Boot119 保持运行；Boot118 已正常退出，旧二进制、磁盘和日志保留。
 - 当前 Vulkan 是隔离 VM 内的 Mesa lavapipe 软件实现；未测试 NVIDIA 4060 Ti，不能据此声称硬件 GPU 性能。
-- 已有验证：469 个 Python 测试通过；12 个设备能力单测通过；6 个 MRT 定向回归通过且无 Vulkan validation 错误。
-- 仍有已知问题：全量图形测试存在其他 SPIR-V validation 报错；Clippy 全量严格检查未通过；部分图形协议尚未实现。详见 [BLOCKERS.md](BLOCKERS.md)。
+- 495 个 Python 测试（含隔离临时镜像格式化）通过、零跳过；图形新改动使用像素比对及 Vulkan 验证层逐项验收，最新批次见 [BLOCKERS.md](BLOCKERS.md)。
+- 已知未完成：双平面纹理、主渲染目标的完整原生格式读回、部分纹理视图、瞬时栅栏超时后的延迟写回义务保留；Reims 全量 Clippy 仍有既存诊断。未声称完整图形兼容。
 
-下面是真实 QMP 截图，**仅为启动选项界面，不是安装器截图**：
+本次真实安装欢迎界面（QMP 原始画面转 PNG）：
 
-![Boot115 启动选项](evidence/boot115/screen-options-center.png)
+![Boot119 ARM64 macOS Tahoe 安装欢迎界面](evidence/boot119/screen-installer-first.png)
 
 ## 目录与备份
 
@@ -46,8 +45,10 @@ export MACVM_DEBUG_ENV_CONFIRMED=YES
 ./scripts/test.sh
 ```
 
-`scripts/validation-boot116.sh` 是当前环境的运行记录，包含绝对路径并依赖离线恢复材料，
-不是全新机器的一键安装器。`scripts/build-graphics-validation.sh` 还依赖前一构建的 `config.status`。
+`scripts/validation-boot118.sh` 保留上一轮运行记录；`validation-boot119.sh` 是当前验证配置，
+包含绝对路径并依赖离线恢复材料，不是全新机器的一键安装器。
+`scripts/build-graphics-storage-validation.sh` 使用独立新构建目录，保留前一构建并校验其二进制哈希，
+仍依赖前一构建的 `config.status`。本次安装界面已单独截图验收，但不代表完整安装或全图形兼容。
 重建前先阅读备份清单和 `BLOCKERS.md`，在新路径准备资源，不覆盖原运行目录。
 
 较早的 Phase 1 首页保留在 [docs/initial-phase1-readme.md](docs/initial-phase1-readme.md)，其中历史状态不能代表当前进度。

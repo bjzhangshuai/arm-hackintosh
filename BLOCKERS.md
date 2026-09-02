@@ -1,6 +1,286 @@
 # Blockers
 
-## Current validation status — 2026-09-02, Boot116 started after crash reproduction/fix
+## Current validation status — 2026-09-03, Boot119 installer welcome accepted
+
+### Installer GUI acceptance
+
+- The genuine QMP capture `screen-installer-first.ppm`, timestamp
+  **2026-09-03 03:09:33 +0800**, shows the foreground **Install macOS Tahoe**
+  menu and a complete welcome window: Tahoe artwork, title, setup instructions,
+  and the blue **Continue** button. The old Recovery window contents are absent.
+  The PNG is a format conversion of that QMP image, not a reconstruction.
+- Serial records real `InstallAssistant` PID **312**, build 532, at 19:06:00 UTC,
+  and `osinstallersetupd` PID **318** at 19:06:24 UTC. The exact BaseSystem
+  executable is a **Mach-O 64-bit arm64 executable**; the boot log identifies
+  **Darwin 25.6.0 / RELEASE_ARM64_VMAPPLE**, and the same BaseSystem's
+  SystemVersion identifies **macOS 26.6 / 25G72**. This is not x86 macOS.
+- After capture, QMP reports **running**, **8 vCPU**, **17179869184 bytes RAM**.
+  Boot119 remains alive; no new boot or installer Continue click was performed
+  after the accepted welcome capture. No disk selection, installation completion,
+  installed-system boot, hardware GPU acceleration, or macOS 27 success is claimed.
+- The five earlier transient fence-timeout/writeback losses and unsupported
+  texture formats remain open. Both QEMU stdout/stderr are empty at this
+  checkpoint; that is not a claim that every graphics path is implemented.
+- Evidence, hashes, reproducibility limits, and test gates:
+  [Boot119 installer acceptance](docs/boot119-installer-acceptance.md).
+
+### Graphics storage follow-up
+
+- The earlier Boot118 QMP screenshot, `screen-installer-before-new-build.ppm`,
+  still shows the foreground Install macOS Tahoe menu and an installer-sized
+  window with stale Recovery contents. The bounded read-only
+  `installer-window-stack.log` has InstallAssistant PID 476 in the normal
+  NSApplication event loop. Repeated clicks or longer waiting do not establish
+  missing image semantics. Boot118 did not pass installer-welcome acceptance.
+- The new native graphics storage path is implemented in
+  `runtime/metal_draw/graphics_storage.rs` and `engine/graphics_storage.rs`:
+  actual raw guest format, explicit descriptor class, seed/upload, graphics
+  barriers, fence completion, native readback, cache invalidation and bounded
+  guest writeback. Linear and IOSurface backings must still resolve to the
+  same physical spans and mapping generation before writeback; overlapping
+  sampled/storage/attachment views or unproven backings decline explicitly.
+- Independent pixel tests cover nonzero seeds, RGBA16F/RG16F/RGBA32F/integer
+  values, partial coverage, BGRA order, skipped primary readback, frame-buffer
+  inputs, MRT, vertex and fragment storage, and ring/pool reuse. FakeHost
+  regressions cover 4K/16K pages, padding/neighbor preservation, map/PFN reuse,
+  unmapping, invalid byte extents and overflow.
+- A strict validation-layer sweep caught two pre-existing readback lifetime
+  defects: a second `acquire_readback` overwrote the prior live allocation;
+  teardown reclaimed returned leases only after draining the free list.
+  Prior live slots now stay owned by the entry, and teardown reclaims before
+  draining. Both transitions have direct regression assertions. The first
+  clean sweep passed 1317 unit + 71 graphics/compute tests, one intentionally
+  ignored performance test, zero VUIDs. Later expanded tests remain a separate
+  gate and must not inherit that result without rerunning.
+- Expanded shader tests exposed raw-word ID scanning: a loaded image with
+  SSA ID 32 collided with literal float widths. A grammar-decoded operand-use
+  API in metal2vulkan now distinguishes IDs from literals, enums and strings;
+  the storage escape analysis still rejects actual opaque-handle escapes and
+  unknown opcodes. Its initial 2 parser and 20 access-analysis tests pass.
+  `StorageImageWriteWithoutFormat` was incorrectly numbered 34 (ImageCubeArray)
+  in the existing runtime helper; corrected to Khronos value 56, with an
+  independent ordinal assertion and a GPU test of actual specialization.
+- Final post-fix native Vulkan gate: **1318 unit + 58 graphics + 14 compute
+  tests passed**, one intentionally ignored performance test, zero validation
+  errors. It includes half/int16 conversions, framebuffer fetch to BGRA and
+  real format/capability specialization. The full host-window unit gate has
+  **1356 passed**, zero ignored/validation errors. Translator: **1093 unit +
+  3 registry + 6 fallback passed**, workspace/all-target strict Clippy passed.
+  Python: **495 passed**, zero skipped with temporary-image formatter tests.
+  Native feature-matrix check passes; Apple cross-check unavailable.
+  Reims Clippy still reports the same 13 existing diagnostics, not a clean tree.
+  Final logs: `boot119-graphics-final-gate.log`, `boot119-host-window-final.log`,
+  `boot119-translator-full.log`, `boot119-translator-clippy.log`,
+  `boot119-python-full-gate.log` under the isolated VM's
+  `/home/macvm/analysis/boot116-rootcause/`.
+- Boot119 built successfully at `build/qemu-boot119-graphics-storage`; binary
+  SHA-256 `bfedb312ba18bcaeed2ca67f449575295eb42c2a986308676e7ab17e809ce411`.
+  Version and shared-library resolution checks pass in the isolated VM. The
+  build retains source snapshots including new files, and the Boot118 binary
+  hash remains unchanged. After retaining `screen-installer-final-pre119.ppm`
+  and the complete Boot118 run, a scoped QMP quit ended PID 842499 normally.
+  Boot119 started at 18:44 UTC on September 2 (02:44 September 3 CST), PID
+  925112, with native crash capture attached. Only one inner VM runs, still
+  8 vCPU / 16 GiB; recovery inputs and authentication policy are unchanged.
+  Its fail and draw logs are explicitly run-specific. The later Boot119 UI
+  acceptance checkpoint is recorded above.
+- Boot119 reaches Boot Picker, then Language Chooser PID 237 after one Options
+  selection and one Continue. A single click on the observed language arrow
+  launches Recovery Springboard PID 261, which reports `Activated` at 19:00:30
+  UTC. No repeated clicks, authentication changes, or additional boot occurred.
+  The current run has five `resident_read` fence-timeout losses during language
+  composition (elapsed-log times 647936, 666380, 691573, 846363, 886777 ms).
+  Later draw completions show the queue recovers without restarting; a bounded
+  two-second native CPU profile taken afterwards contains 150 samples, zero
+  lost samples, mostly TCG rather than active llvmpipe. It does not identify
+  the shader active at each timeout. QEMU stdout/stderr still have no VUIDs.
+  Source inspection: the engine fence limit is five seconds; the render-flush
+  error arms unpin the resident and consume the deferred obligation, including
+  on transient TIMEOUT. Pending GPU cleanup itself stays fence-owned. Treat
+  loss of the guest writeback obligation separately from unsafe GPU lifetime;
+  simply increasing the wait is not a demonstrated root-cause fix.
+- Type-12 investigation now confirms the exact 25G72 driver's format-info
+  branch for 0x226/0x227 selects two planes, each with four-byte element/block
+  geometry, gated by the driver's capability query. This does not establish
+  packing/channel semantics. No guessed RGBA interpretation or feature-bit
+  suppression is included in the new code.
+- Exact-driver allocator inspection now resolves `allocDimensionNormal` at
+  unslid 0xd8e0 and its dispatch at 0xdb30. Each plane uses a 24-byte header plus
+  36 bytes per mip, including its own base offset, slice extent, block geometry,
+  mip offset/extent, row stride and dimensions. A one-mip dual-plane record
+  therefore has two 60-byte layouts; the captured type-12 envelope has a 12-byte
+  prefix and 44-byte serialized descriptor. The allocator proves layout, not
+  RGB/alpha encoding. Private disassembly stays only in the isolated analysis
+  directory and is not repository source or a test fixture.
+
+### Earlier Boot117/118 evidence and gates
+
+- Boot117 ran one uninterrupted macOS 26.6/25G72 ARM64 recovery boot in the
+  isolated `macvm-validation` VM, using the new iSC layout and shader-contract
+  binary. Native APFS mounts xART, iSCPreboot and Hardware; the prior missing
+  Hardware directory crash is absent. `mobileactivationd` PID 124 remains alive.
+- Recovery Springboard PID 409 launches after Language Chooser Continue (`en`).
+  Serial records the actual activation result `Activated` at 16:10:33 UTC,
+  `showWindow` at 16:11:08, and KeyRecoveryAssistant success (200) at 16:11:38.
+  No activation state or authentication result was fabricated or patched.
+- QEMU then exits **SIGSEGV/139**, around 27 minutes, not by manual stop or
+  timeout. `native-crash-watch.log` captures llvmpipe worker 9 at RIP 0, with
+  several sibling workers at the same null call. Main thread is in the Vulkan
+  sampled-image pool. This identifies the failing rendering subsystem, but
+  does not yet establish which shader instruction caused the null call.
+- `qemu.stdout` retains VUID 07988/08114 (missing binding 161), then 07990
+  (binding 163 declared STORAGE_IMAGE by SPIR-V but supplied SAMPLED_IMAGE)
+  and an Rgba16f versus BGRA8 view mismatch. Empty stderr is not a clean gate.
+  The engine built layouts only from supplied resources, without checking the
+  complete shader interface; the runtime merely logged absent texture binds.
+- Last real screenshot: `artifacts/boot117/screen-language-ready.png` is the
+  gray language/progress background, not readable recovery utilities or the
+  macOS installer. There is no accepted installer screenshot yet.
+- Exact run evidence remains at
+  `/home/macvm/runs/aux-26.6/xnu-imgsrc-reims-boot117-isc-complete`.
+  Binary SHA-256:
+  `29b608a38ff2f2a2dc5ef48dd2ce7b403f0004eed9a1ff2f4ab129a211cb60b0`.
+  The old run, binaries, disks, logs and production machines are unchanged.
+- New descriptor preflight checks missing bindings, descriptor classes,
+  sets, image dimensions/array/multisample state and unsupported descriptor
+  arrays before context creation or submission. Seven focused synthetic tests
+  plus two GPU integration tests pass in the isolated VM. It rejects unsafe draws; it does **not** implement
+  storage textures or make those previously missing pixels correct.
+- MRT ColorInput 1..7 now uses same-format pass-before snapshots, retaining
+  sparse input indices and matching input-attachment device limits. CLEAR and
+  LOAD semantics, primary fetch combinations, pooled/resident primary paths,
+  depth, and RGBA8/RG16F/RGBA16F secondaries pass 84 pixel-checked combinations.
+  The matrix exposed VUID 09600: the old layout was read before an image was
+  recreated on format change. Querying the layout after registry ensure fixes
+  that stale-image state. Primary `target_clear` is also consumed now.
+- SDK MTLPixelFormat.h identifies 0x3f as RG16Uint (not float/unorm). Native
+  upload preserves its four-byte texels without RGBA conversion. Padded-row,
+  short-input and actual integer texel-fetch tests verify values through 65535.
+  Integer test samplers must use nearest filtering: the initial fixture used
+  linear and triggered VUID 04553 despite nominal test success; the corrected
+  fixture passes the strict validation gate. No product sampler default changed.
+- Latest isolated checks: **1347 library tests passed** with host-window,
+  **1309 library tests passed** with the actual QEMU-linked `backend-vulkan`
+  feature arm, including five bounded diagnostic tests. The final product-arm
+  GPU gate with diagnostic capture enabled has **67 graphics/compute tests
+  passed**, one intentionally ignored performance test, zero validation errors.
+  **494 Python tests passed**, zero skipped, including Boot118 configuration and
+  the native-crash capture helpers. Feature-matrix native Vulkan check passes;
+  Apple cross-check is unavailable (no Apple target/rustup in this guest), not
+  verified. No build or test was run on the production Mac to fill that gap.
+  Clippy has 13 pre-existing diagnostics outside the feature edits, so the tree
+  is not claimed warning-free. No installer completion is implied by these tests.
+- Remaining connected gaps: primary `target_format` is still not consumed
+  through allocation/seed/readback; graphics STORAGE_IMAGE access/synchronization
+  and writeback are not implemented; type-12 176-byte texture descriptors are
+  unsupported. Do not guess aliases, fabricate transparent textures or change
+  descriptor class without proving the shader operations and texture contract.
+- Read-only PVG page-table helper passes four tests (4K/16K geometry, flagged
+  PFNs, unmapped/malformed tables, short reads and cross-page spans). Idle
+  task-4 root entries were zero; transient unmapping is only a hypothesis.
+  The live type-12 watch hit but failed its pointer/length guard and detached.
+  No descriptor bytes were obtained; diagnostics now normalize unsigned
+  registers and retain rejected length/pointer values. A new capture is needed.
+- Opt-in `REIMS_VGPU_CAPTURE_REJECTED_CONTRACTS=YES` captures unknown descriptor
+  prefixes directly at the live resolution point and retains rejected vertex/
+  fragment SPIR-V with binding metadata before pipeline creation. Capture-only
+  limits: 64 KiB descriptor prefix, 4 MiB/artifact, 32 MiB total, 128 captures.
+  Exact duplicates are suppressed. Files/directories are owner-only and
+  create-new; RAM-only probe reads reject MMIO holes/overflow and cannot write.
+  This is private evidence under guest `/tmp`, never a committed Apple fixture.
+- Native crash watch validates the exact QEMU executable/PID and the isolated
+  hostname, then continues execution. On a real SIGSEGV/SIGABRT it records all
+  thread stacks, registers, mappings, and at most sixteen 64 KiB readable
+  executable windows around crash frames. Files are exclusive/owner-only;
+  no full guest-memory core is generated and no VM is manually killed.
+- Boot118 built successfully in `build/qemu-boot118-render-contract` from the
+  tested patch set; QEMU reports 11.0.93, SHA-256
+  `b260ad46476fbc8496692b0932f1aff7d059b087084f6c333964b0838f802d42`.
+  Boot117 binary hash verification passes. The new run is active at
+  `/home/macvm/runs/aux-26.6/xnu-imgsrc-reims-boot118-render-contract`, QEMU
+  PID 842499, 8 vCPUs/16 GiB, GDB 12354, VNC loopback display 118, no timeout.
+  Initial restore helper and GDB phases both return zero. The native watcher
+  attaches using sudo inside this VM because its ptrace policy rejects a
+  sibling process attach; no ptrace/sysctl policy was modified.
+  The runner changes only binary/run/socket identity and
+  opt-in contract capture; the Boot117 recovery-chain and storage inputs remain
+  unchanged. Primary native-format seed/readback and graphics storage-image
+  semantics are still open work, not included in the completion claims above.
+- Native primary-format audit: `engine/exec.rs` still derives allocation and
+  primary alias snapshot format from the BGRA boolean and allocates four bytes
+  per readback pixel. `engine/mod.rs::ResidentReadSnapshot` drops `slot.format`;
+  both `read_target_inner` and `read_target_leased` likewise assume four bytes.
+  Runtime `metal_draw/vulkan.rs` CPU seed, `M2vDrawSpan::Pixels`, surface-cache
+  and writeback routes carry only RGBA8/BGRA8. Enabling `target_format` at the
+  render-pass alone would therefore create a new buffer/format mismatch.
+  A complete follow-up needs format-bearing readback/seed data through these
+  consumers, exact-size guards and native-value Store/Load/sampling tests,
+  including format changes under one identity and half-float values outside
+  [0,1]. Current MRT tests prove GPU snapshot/sampling, not native CPU readback.
+- Boot118 live evidence: Boot Picker reaches a real Recovery/Options screen;
+  selecting Options and Continue launches Language Chooser PID 234. Actual
+  `screen-language-window.ppm` shows the complete readable language list and
+  forward button. English Continue is confirmed in serial at 17:22:27 UTC.
+  This is progress beyond Boot117's gray background, not an installer verdict.
+- Springboard PID 299 records real `Activated` at 17:23:09 UTC and successful
+  KeyRecoveryAssistant authentication (200) at 17:24:24. After cold compilation,
+  the actual `screen-utilities-menu-2.ppm` shows readable Restore from Time
+  Machine / Reinstall macOS Tahoe / Web Browser / Disk Utility and Continue.
+  Central icons/backgrounds remain incomplete. The same Boot118 is retained;
+  Continue launches **InstallAssistant PID 476**, build 532, at 17:41:08 UTC.
+  Its actual welcome window is still awaited; process launch alone is not the
+  accepted installer screenshot. The read-only recovery image's actual
+  `/Install macOS Tahoe.app/Contents/MacOS/InstallAssistant` is Mach-O ARM64
+  (not a universal/x86 executable), and SystemVersion.plist is 26.6/25G72.
+- Selection appeared visually unchanged even after input. A bounded read-only
+  GDB snapshot (`springboard-input-stack.log`) verifies the 25G72 instruction
+  contract and detaches normally. Springboard's main thread is in NSApplication
+  event wait, not blocked on activation; coherent symbolization uses this boot's
+  dyld slide 0x0b6c4000, derived from mach_msg2_trap +8 and corroborated by the
+  frame chain. The subsequent screenshot shows Reinstall selected and Continue
+  disabled during InstallAssistant launch: the earlier highlight was stale,
+  not evidence that the inputs were rejected. No input/QEMU patch was made.
+- The direct probe now captures four complete 176-byte type-12 descriptors in
+  `/tmp/reims-vgpu-contract-842499` (0001, 0002, 0006, 0007), with task/ref/GVA
+  and explicit page_shift=14. They have one allocation header, two layout
+  records, and a trailing serialized texture block naming format 0x226; do not
+  reinterpret either plane as a normal RGBA texture until its contract is known.
+- Captured rejected fragments 0004/0005 identify a more precise binding-161
+  cause: the variable is loaded, but that load's result has no instruction
+  consumer. The compiler retains an unused descriptor load, which makes the
+  resource statically used for Vulkan despite no image read consuming it.
+  `passes/finalize.rs` calls `function_referenced_ids` before dropping globals,
+  so that unused load keeps the descriptor/interface alive. A narrow structural
+  elimination of non-volatile unused descriptor loads is now implemented before
+  liveness in `passes/finalize.rs`, preserving image operations, escaped handles,
+  indirect/non-opaque loads, memory-access operands and volatile decorations.
+  The synthetic AIR test keeps the real texture read and drops unused texture/
+  sampler bindings without an `air.arg_unused` hint. Reflection still describes
+  declared AIR resources; documentation and legacy fixtures distinguish that
+  metadata from live SPIR-V. Isolated tests: **1091 unit + 3 registry + 6 fallback
+  passed**, workspace/all-target Clippy `-D warnings` passes. This subsequent
+  translator edit is NOT loaded into the already-running Boot118 binary.
+- Boot118 captures the actual graphics storage-image failure as private fragment
+  0025: a framebuffer-input read feeds a real image write at binding 163 with
+  Rgba16f. Supplied runtime resource is sampled BGRA8 (64x64). This is not an
+  unused descriptor and must not be eliminated or replaced with dummy content.
+  Required implementation spans native texture staging, format specialization,
+  STORAGE_IMAGE descriptors, graphics-stage synchronization, post-draw writeback
+  and resident/cache invalidation. Merely reclassifying the descriptor is unsafe.
+- Protocol audit: this guest requests 245 and is clamped to 62; device-info key
+  12 advertises two-plane textures and the run uses the existing forced-Apple
+  limits setting. Those are current evidence, not proof of implemented support.
+  No capability or protocol changes were made during this run. Private format
+  0x226 has an external research lead naming RGB10A8_2P_XR10, but plane packing
+  and transfer semantics still need authoritative driver/format proof.
+- Actual Language Chooser draws also request format 0x3f as a primary render
+  target; only sampled RG16Uint is supported by the current patch. The typed
+  target/clear/readback path above must cover integer targets too. Their render
+  declines are recorded, not hidden by the successful language screenshot.
+- Upload work remains paused at the user's request. No Apple artifacts are
+  committed. Builds/tests/debugging stay entirely inside the isolated VM.
+
+## Historical checkpoint — 2026-09-02, Boot116 reaches Recovery Springboard
 
 - ARM64 XNU 25.6.0 (`RELEASE_ARM64_VMAPPLE`) and macOS BaseSystem 26.6 build 25G72
   boot and pivot to the recovery root. The old B003 pre-kernel notes below are historical.
@@ -11,11 +291,75 @@
   RecoveryOS Agent launches Language Chooser and launchprogresswindow. QEMU then
   exits with SIGSEGV (139) at approximately 26m53s, before a language-screen capture.
   It was not manually stopped. See B009; no installer completion is claimed.
+- Boot116 stays in the same run and passes that startup-selector handoff: after keyboard
+  activation, Boot Picker exits with status 0 and Language Chooser PID 439 starts.
+  Serial records `show choice window`, `LCA: Refreshing language list`, and later hiding
+  Installer Progress. The executable in the exact recovery image is Mach-O ARM64e.
+  Actual screenshots show the Apple progress UI and an emerging language-window background;
+  no readable language list, recovery utilities or installer screenshot is claimed yet.
+  `qemu.stderr` remains empty at this checkpoint, with a native SIGSEGV backtrace watcher
+  attached only to the isolated QEMU process. The live dyld slide is 0x4d88000, not Boot115's.
+- Language Chooser accepts Continue (`en`) and starts Recovery Springboard PID 494.
+  Its main-thread stack is blocked in `MobileActivationMacOS.getActivationState` during
+  `_windowDidLoad`, not in the normal event loop. `mobileactivationd` has crashed 19 times
+  with SIGTRAP (last PID 644, guest 15:02:14); launchd now defers each spawn by 1199 seconds.
+  The actual screenshot still lacks the controls. A process-scoped, observe-only user-crash
+  watch is armed for the next automatic service spawn; it neither fabricates an activation
+  result nor changes service policy. Boot116 remains the same live run.
+- Correction to validation interpretation: `qemu.stderr` being empty does **not** mean
+  Vulkan validation is clean. `qemu.stdout` contains six VUID classes: 06340/06341
+  (stage storage writes not enabled), 08740 (VariablePointersStorageBuffer / Demote
+  capability features not enabled), 08737 (scalar condition with vector OpSelect under
+  a downgraded SPIR-V version), 07988/08114 (missing descriptor binding 161).
+  Attachment-composition targeted tests were clean; the entire GUI is not.
 - The Linux PVG/Vulkan bridge produces actual visible UI on a software renderer. This
   supersedes the initial black screen and B002's missing-backend status, but is **not**
   hardware acceleration or a performance result. The same boot was retained throughout.
 - Build, tests, GDB, package installation and execution remain inside `macvm-validation`.
   The production Mac and production hypervisor are not test environments.
+- Source-level fixes prepared during the same Boot116 run (not hot-installed):
+  SPIR-V retains its actual 1.4+ semantics and required entry interfaces; Vulkan
+  supported storage-write/variable-pointer/demote features are queried and enabled;
+  unsupported shader feature contracts decline before driver module creation.
+  Teardown now retires pooled command buffers before destroying cached pipelines.
+  The new deferred-submit/reset test reproduces three VUID-00765 errors on the old
+  ordering. With the fix, graphics parity is 48 passed / 1 ignored and compute is
+  14 passed with no VUID or SKIP output after installing glslc only inside the VM.
+  Metal2Vulkan: 1086 unit + 3 registry + 6 fallback tests passed, Clippy clean.
+  Reims: 1334 library tests passed before the teardown edit; full Clippy still
+  reports pre-existing lints outside this feature change. Do not claim all checks clean.
+- PID 861 reaches `_os_crash` (observed LR 0x104506924); the page-aligned return
+  address match identifies `main.cold.4`, the required-directory creation failure.
+  The direct user-memory stack read failed, so no full NSError/errno is claimed yet.
+  The watch now uses the process's own pmap and isolates field failures; 12 focused
+  capture/page-table tests pass. Next automatic service retry is still being observed.
+- Follow-up PID 1068 capture **succeeds** with its own pmap (root 0x1c5944000):
+  `_os_crash` receives a complete nested NSError naming
+  `/System/Volumes/Hardware/MobileActivation/internal`, NSCocoaErrorDomain 513,
+  underlying NSPOSIXErrorDomain **1 (EPERM)**. Its main.cold.4 caller and main stack
+  are captured in `mobileactivation-crash-watch-v4.log`; watch detaches normally.
+  This closes the missing failure-path/errno evidence, without changing activation.
+- Static 25G72 mobileactivationd requests
+  `/System/Volumes/Hardware/MobileActivation/{internal,logs}`. Boot116 serial explicitly
+  reports no iSC Hardware role 320 (0x140), and the old builder intentionally creates
+  only xART. This is a concrete storage-layout gap, not a GPU or activation-result fix.
+  A separate apfsprogs source copy now builds 1–4 volumes with independent maps/trees,
+  UUIDs, fs_index, role and space accounting. Its five real formatter/checker tests
+  cover 1–4 layouts, legacy format, and malformed/duplicate/conflicting/oversized
+  arguments; independent `apfsck -cuw` and explicit map/checksum checks pass. Another
+  32 iSC/EAN/layout unit tests pass. The new three-volume image is offline only until
+  the live failure evidence and next-run preflight are complete.
+- New offline image `validation-isc-complete-v4-ean.img`, 2 GiB,
+  SHA-256 `8617dcc1835e84da0e08d0ee4cee9c035691976da77528c92acc17aa4a80c520`.
+  Old v3 template remains `761c7b5d611a6e811cb8cd3b7641f9dc619739b924f5aec8b357da5e411338bf`.
+  New QEMU builds and prints version 11.0.93 at `build/qemu-boot117-shader-contract`,
+  SHA-256 `29b608a38ff2f2a2dc5ef48dd2ce7b403f0004eed9a1ff2f4ab129a211cb60b0`.
+  Build verifies the Boot116 executable hash is unchanged.
+  Python all-enabled run: **485 tests, zero skipped**; subsequent Boot117 configuration
+  contract is an additional preflight test. Combined Vulkan gate: **62 passed,
+  1 intentionally ignored performance case, zero VUID/validation errors or silent skips**.
+  Boot117 script refuses overlapping ARM guests and uses `timeout 0s` (disabled),
+  avoiding an arbitrary runtime cutoff during diagnosis. It has not yet been launched.
 - Latest Python regression run: `python3 -m unittest discover -s tests -q` passed
   **469 tests** in the isolated VM, including EAN header, timer, exit-status and Boot116 configuration contracts.
   The focused preflight subset passed 99 tests and Boot114 passed `bash -n`.
@@ -211,7 +555,8 @@
   QEMU crashed. The runner now rejects crash, timeout, malformed or missing exit status;
   only short-smoke mode's intentional TERM is accepted. Its 35 focused Python tests pass.
 - **Next bounded experiment:** complete Vulkan validation/pixel regressions and build a
-  separate QEMU binary before a new full boot. Keep Boot115 artifacts and old binary intact.
+  separate QEMU binary before a new full boot (completed). Continue Boot116's Language
+  Chooser/Recovery UI flow without restarting it. Keep Boot115 artifacts and old binary intact.
 - **Boot116 build:** `build/qemu-boot116-attachments/qemu-system-aarch64`, SHA-256
   `80d19c41e8e8e9be5a4f662e7f303b770956e14367516634467d5c3388f1ee34`.
   All 2239 build targets completed; Boot115's binary hash remains unchanged. The exact

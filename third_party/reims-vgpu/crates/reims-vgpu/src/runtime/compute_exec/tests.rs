@@ -23,6 +23,127 @@ use crate::runtime::gva_mem::write_task_gva_arm64e;
 use crate::runtime::host::FakeHost;
 
 #[cfg(feature = "backend-vulkan")]
+fn graphics_storage_mapping_fixture(
+    page_shift: u32,
+) -> (DeviceState, FakeHost, GraphicsStagedTexture, u64) {
+    use crate::contract::iosurface_pages::{PAGE_ENTRY_PFN_SHIFT, PAGE_ENTRY_VALID};
+    use crate::contract::pixel_format::MTL_FORMAT_RGBA16_FLOAT;
+    let mut state = DeviceState::new(DeviceId(1), page_shift);
+    let mut host = FakeHost::new();
+    let page_size = 1u64 << page_shift;
+    let gpa = 0x20 * page_size;
+    host.map_range(gpa, (page_size * 2) as usize, 0xa5);
+    state.map_surface(3);
+    let mapping = state.mappings.get_mut(&3).unwrap();
+    mapping.page_entries = [0x20u32, 0x21]
+        .into_iter()
+        .map(|p| (p << PAGE_ENTRY_PFN_SHIFT) | PAGE_ENTRY_VALID)
+        .collect();
+    let generation = mapping.map_generation;
+    let texture = StagedTexture {
+        binding: 163,
+        pixel_format: MTL_FORMAT_RGBA16_FLOAT,
+        storage_selector: pixel_format::storage_selector(MTL_FORMAT_RGBA16_FLOAT).map(|s| s as u32),
+        width: 3,
+        height: 2,
+        bytes: vec![0; 48],
+        is_storage: true,
+        residency: None,
+        seed_skipped: false,
+        sample_resident: None,
+        writeback: TextureWriteback::Type11 {
+            mapping_id: 3,
+            surface_offset: page_size - 16,
+            surface_bpr: 32,
+            span_end: page_size + 48,
+            width: 3,
+            height: 2,
+            bpp: 8,
+        },
+    };
+    let physical_spans = graphics_backing_spans(&mut state, &host, 0, &texture.writeback).unwrap();
+    (
+        state,
+        host,
+        GraphicsStagedTexture {
+            texture,
+            physical_spans,
+            mapping_generation: Some((3, generation)),
+        },
+        gpa,
+    )
+}
+
+#[cfg(feature = "backend-vulkan")]
+#[test]
+fn graphics_storage_writeback_preserves_padding_and_crosses_guest_pages() {
+    for shift in [PAGE_SHIFT_X86, PAGE_SHIFT_ARM64E] {
+        let (mut state, mut host, mut staged, gpa) = graphics_storage_mapping_fixture(shift);
+        let page_size = 1u64 << shift;
+        let pixels = (0..48u8).collect::<Vec<_>>();
+        staged
+            .writeback(&mut state, &mut host, 0, pixels.clone())
+            .unwrap();
+        let mut actual = vec![0; 80];
+        host.read_gpa(gpa + page_size - 24, &mut actual).unwrap();
+        assert_eq!(&actual[..8], &[0xa5; 8]);
+        assert_eq!(&actual[8..32], &pixels[..24]);
+        assert_eq!(&actual[32..40], &[0xa5; 8]);
+        assert_eq!(&actual[40..64], &pixels[24..]);
+        assert_eq!(&actual[64..], &[0xa5; 16]);
+    }
+}
+
+#[cfg(feature = "backend-vulkan")]
+#[test]
+fn graphics_storage_refuses_recycled_backing_or_bad_readback_before_writing() {
+    for case in 0..5 {
+        let (mut state, mut host, mut staged, gpa) =
+            graphics_storage_mapping_fixture(PAGE_SHIFT_ARM64E);
+        let mut bytes = vec![0x12; 48];
+        match case {
+            0 => {
+                bytes.pop();
+            }
+            1 => {
+                state.mappings.get_mut(&3).unwrap().map_generation += 1;
+            }
+            2 => {
+                state.mappings.get_mut(&3).unwrap().page_entries.swap(0, 1);
+            }
+            3 => {
+                state.mappings.get_mut(&3).unwrap().mapped = false;
+            }
+            4 => {
+                staged.texture.width = u32::MAX;
+                staged.texture.height = u32::MAX;
+            }
+            _ => unreachable!(),
+        }
+        assert!(staged.writeback(&mut state, &mut host, 0, bytes).is_err());
+        let mut actual = vec![0; 0x8000];
+        host.read_gpa(gpa, &mut actual).unwrap();
+        assert!(
+            actual.iter().all(|b| *b == 0xa5),
+            "refused case {case} changed guest bytes"
+        );
+    }
+}
+
+#[cfg(feature = "backend-vulkan")]
+#[test]
+fn graphics_storage_alias_detection_uses_physical_byte_spans() {
+    let (_, _, a, _) = graphics_storage_mapping_fixture(PAGE_SHIFT_X86);
+    let (_, _, mut b, _) = graphics_storage_mapping_fixture(PAGE_SHIFT_X86);
+    assert!(a.overlaps(&b));
+    let end = a.physical_spans.last().unwrap().1;
+    b.physical_spans = vec![(end, end + 16)];
+    assert!(!a.overlaps(&b), "adjacent byte windows do not alias");
+    b.physical_spans = vec![(end - 1, end + 16)];
+    assert!(a.overlaps(&b), "even one overlapping byte must decline");
+}
+
+#[cfg(feature = "backend-vulkan")]
 #[test]
 fn spirv_word_parser_splits_short_header_from_misalignment() {
     assert_eq!(

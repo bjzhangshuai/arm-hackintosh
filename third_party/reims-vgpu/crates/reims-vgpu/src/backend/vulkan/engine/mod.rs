@@ -13,6 +13,7 @@ mod compute_validation;
 mod context;
 mod counters;
 mod desc_arena;
+pub mod descriptor_contract;
 mod device_lost;
 mod digest;
 mod draw_execution;
@@ -22,10 +23,12 @@ mod draw_validation;
 mod exec;
 mod exec_compute;
 mod facade_decline;
+mod graphics_storage;
 mod host_slab;
 pub mod init_decline;
 mod pools;
 pub mod reason;
+pub mod shader_contract;
 mod slab;
 pub mod stage_phase;
 pub mod types;
@@ -49,13 +52,14 @@ pub use types::{
     BlendFactor, BlendOp, BlendStateResource, BufferContent, ColorWriteMask, ComputeBufferOutput,
     ComputeBufferResource, ComputeOutput, ComputeRequest, ComputeResidentSampleBind,
     ComputeSampledImageResource, ComputeStorageImageResource, ComputeStorageResidency, CullMode,
-    DepthState, DrawError, DrawOutput, DrawRequest, GuestRun, GuestRunSource, IndexType,
-    IndexedDrawResource, PrimitiveTopology, SampledContentIdentity, SampledImageResource,
-    SampledSource, SamplerAddressMode, SamplerBorderColor, SamplerCompareFunction, SamplerFilter,
-    SamplerMipFilter, SamplerResource, ScissorResource, SecondaryColorTarget, SeedOrder,
-    StencilFaceOps, StencilOp, StencilState, StorageBufferResource, StorageImageFormat,
-    TargetIdentity, VertexAttributeFormat, VertexAttributeResource, VertexStepFunction,
-    ViewportResource, WindowPresentSource, COLOR_INPUT_BINDING,
+    DepthState, DrawError, DrawOutput, DrawRequest, GraphicsStorageImageResource, GuestRun,
+    GuestRunSource, IndexType, IndexedDrawResource, PrimitiveTopology, SampledContentIdentity,
+    SampledImageResource, SampledSource, SamplerAddressMode, SamplerBorderColor,
+    SamplerCompareFunction, SamplerFilter, SamplerMipFilter, SamplerResource, ScissorResource,
+    SecondaryColorTarget, SeedOrder, StencilFaceOps, StencilOp, StencilState,
+    StorageBufferResource, StorageImageFormat, TargetIdentity, VertexAttributeFormat,
+    VertexAttributeResource, VertexStepFunction, ViewportResource, WindowPresentSource,
+    COLOR_INPUT_BINDING,
 };
 pub use vk_call::{VkCall, VkOp};
 #[cfg(feature = "host-window")]
@@ -127,8 +131,12 @@ impl EngineState {
                 if let Some(mut presenter) = self.window_presenter.take() {
                     presenter.destroy(ctx, Some(&mut self.pools));
                 }
-                self.caches.destroy_all(&ctx.device);
+                // Pool teardown retires submitted command buffers first.
+                // Those buffers still reference cached graphics/compute
+                // pipelines: destroying the caches before waiting violates
+                // VUID-vkDestroyPipeline-pipeline-00765 on deferred dispatch.
                 self.pools.destroy_all(&ctx.device);
+                self.caches.destroy_all(&ctx.device);
             }
         } else {
             self.caches.clear_logical();
@@ -922,10 +930,7 @@ fn resident_capture_miss_discriminant(
     h.finish()
 }
 
-fn note_resident_capture_miss(
-    identity: &TargetIdentity,
-    decline: reason::TargetReadDecline,
-) {
+fn note_resident_capture_miss(identity: &TargetIdentity, decline: reason::TargetReadDecline) {
     let mut emit = crate::observe::Emit::decline("present_capture_resident", &decline);
     for (key, value) in draw_execution::identity_fields(identity) {
         emit = emit.field(key, value);
@@ -1729,15 +1734,13 @@ pub fn reset_draw_counters() {
 /// Test-only: destroy device, clear recreate budget, rebuild on next draw.
 pub fn test_reset_engine() {
     let mut g = lock_engine();
+    // Use the production teardown ordering, including presenter resources.
+    g.flush_device_derived();
     if let Some(mut ctx) = g.owner.ctx.take() {
         unsafe {
-            g.caches.destroy_all(&ctx.device);
-            g.pools.destroy_all(&ctx.device);
             ctx.destroy();
         }
     }
-    g.caches = ObjectCaches::new();
-    g.pools = ResourcePools::new();
     g.owner = ContextOwner::new();
     g.counters.reset_all();
 }

@@ -953,7 +953,8 @@ fn resolve_plain_texture_sample_target<M: HostMemory + HostOps>(
             let live = objects::lookup_list_entry(state, host, task_id, view.base_texture_ref)?;
             (view.base_texture_ref, view.pixel_format, view.level, live)
         } else {
-            let live = entry.or_else(|| objects::lookup_list_entry(state, host, task_id, texture_ref))?;
+            let live =
+                entry.or_else(|| objects::lookup_list_entry(state, host, task_id, texture_ref))?;
             (texture_ref, None, 0, live)
         };
     if live.object_type != OBJECT_TYPE_SERIALIZED_TEXTURE {
@@ -1053,11 +1054,17 @@ pub(super) fn resolve_sampled_source<M: HostMemory + HostOps>(
         ));
     }
 
-    if let Some(rt) = resolve_plain_texture_sample_target(state, host, task_id, texture_ref, entry) {
+    if let Some(rt) = resolve_plain_texture_sample_target(state, host, task_id, texture_ref, entry)
+    {
         if let Some(identity) = texture_identity_from_rt(&rt) {
             if crate::backend::vulkan::engine::resident_content_ready(&identity) {
                 crate::runtime::drain::note_store_route("type9_sample_resident");
-                return Some((rt.width, rt.height, 0, SampledSourceRequest::Target(identity)));
+                return Some((
+                    rt.width,
+                    rt.height,
+                    0,
+                    SampledSourceRequest::Target(identity),
+                ));
             }
             crate::runtime::drain::note_store_route("type9_sample_not_ready");
         }
@@ -2466,6 +2473,7 @@ fn try_linear_sample_zero_copy<M: HostMemory + HostOps>(
         Ok((layout, decline))
             if layout.is_four_byte_color()
                 || layout == TexelLayout::R16Float
+                || layout == TexelLayout::Rg16Uint
                 || (layout == TexelLayout::R32Float
                     && engine::supports_sampled_r32f_linear_filter()) =>
         {
@@ -2723,8 +2731,16 @@ fn native_scratch_to_upload(
 ) -> Option<(Vec<u8>, TexelLayout)> {
     let out_row = (w as usize).checked_mul(RGBA8_BPP as usize)?;
     let out_len = out_row.checked_mul(h as usize)?;
+    if bpr < tight {
+        return None;
+    }
     let bpr = bpr as usize;
-    if let Some(fmt) = linear_native_upload_format(sample_fmt, true)
+    let integer_layout = translate::pixel::sampled_pixels(sample_fmt)
+        .ok()
+        .map(|(layout, _)| layout)
+        .filter(|layout| *layout == TexelLayout::Rg16Uint);
+    if let Some(fmt) = integer_layout
+        .or_else(|| linear_native_upload_format(sample_fmt, true))
         .filter(|_| tight == (w as u64).saturating_mul(RGBA8_BPP as u64))
     {
         let row_bytes = tight as usize;
@@ -2751,6 +2767,46 @@ fn native_scratch_to_upload(
         }
     }
     Some((out, TexelLayout::Rgba8))
+}
+
+#[cfg(test)]
+mod native_integer_texture_tests {
+    use super::*;
+
+    #[test]
+    fn rg16_uint_preserves_all_bits_and_strided_rows_without_rgba_conversion() {
+        let values = [0u16, 1, 255, 256, 32768, 65535];
+        let row: Vec<u8> = values.into_iter().flat_map(u16::to_le_bytes).collect();
+        let mut strided = row.clone();
+        strided.extend([0xaa; 4]);
+        strided.extend(&row);
+        let (actual, layout) =
+            native_scratch_to_upload(&strided, 3, 2, 16, pixel_format::MTL_FORMAT_RG16_UINT, 12)
+                .expect("native integer rows");
+        assert_eq!(layout, TexelLayout::Rg16Uint);
+        assert!(!layout.is_four_byte_color());
+        assert_eq!(actual, row.repeat(2));
+        for n in 0..strided.len() {
+            assert!(native_scratch_to_upload(
+                &strided[..n],
+                3,
+                2,
+                16,
+                pixel_format::MTL_FORMAT_RG16_UINT,
+                12
+            )
+            .is_none());
+        }
+        assert!(native_scratch_to_upload(
+            &strided,
+            3,
+            2,
+            11,
+            pixel_format::MTL_FORMAT_RG16_UINT,
+            12
+        )
+        .is_none());
+    }
 }
 
 /// The sampled linear ladder's hot rung: read the guest's own rows for this
@@ -4218,7 +4274,7 @@ fn try_metal2vulkan_draw<M: HostMemory + HostOps>(
 
     // SPIR-V words for the engine, shared from the translation cache (Arc — no
     // per-draw materialization; fragment reloc variants are cached per shader).
-    let v_words = v_shader.words.clone();
+    let mut v_words = v_shader.words.clone();
     #[allow(unused_mut)]
     let mut f_words = f_shader.words.clone();
 
@@ -4473,17 +4529,18 @@ fn try_metal2vulkan_draw<M: HostMemory + HostOps>(
         }
 
         // Framebuffer fetch (`air.render_target` INPUT param `dest_N` →
-        // reflection `ColorInput` at binding 96+N): the engine supports the
-        // attachment-0 fetch as a Vulkan subpass input. `dest_N>0` (fetching a
-        // secondary MRT attachment) has no engine path yet — fail visibly, never
-        // execute a shader whose destination read would be unbound.
-        let frag_color_input = {
+        // reflection `ColorInput` at binding 96+N). Preserve each Metal slot;
+        // the engine validates attachment presence and supplies snapshots.
+        let (frag_color_input, secondary_color_inputs) = {
             use metal2vulkan::reflect::ResourceKind;
             let mut fetch0 = false;
+            let mut secondary = 0u8;
             for rb in &f_shader.reflection.bindings {
                 if rb.kind == ResourceKind::ColorInput {
                     if rb.metal_index == 0 {
                         fetch0 = true;
+                    } else if rb.metal_index < 8 {
+                        secondary |= 1 << rb.metal_index;
                     } else {
                         return Err(DrawError::DrawPreparation(
                             DrawPreparationDecline::ColorInputMrtUnsupported {
@@ -4493,7 +4550,7 @@ fn try_metal2vulkan_draw<M: HostMemory + HostOps>(
                     }
                 }
             }
-            fetch0
+            (fetch0, secondary)
         };
         crate::runtime::chain_phase::enter(crate::runtime::chain_phase::Phase::Sampled);
         // Sampled textures + samplers (metal2vulkan bands: textures 32+N, samplers 64+M).
@@ -4505,12 +4562,41 @@ fn try_metal2vulkan_draw<M: HostMemory + HostOps>(
         let mut images: Vec<crate::backend::vulkan::engine::SampledImageResource> = Vec::new();
         let mut samplers: Vec<crate::backend::vulkan::engine::SamplerResource> = Vec::new();
         let mut sampler_binds: std::collections::BTreeSet<u32> = Default::default();
+        let mut writable = super::graphics_storage::prepare(
+            state,
+            host,
+            req,
+            separate_sampled,
+            [&v_shader.reflection, &f_shader.reflection],
+            [&mut v_words, &mut f_words],
+        )?;
         {
             let mut push_tex = |index: u32,
                                 texture_ref: u32,
                                 frag_stage: bool|
              -> Result<(), DrawError> {
                 if index >= MAX_BIND_SLOTS || texture_ref == 0 {
+                    return Ok(());
+                }
+                let binding = TEXTURE_BINDING_BASE
+                    + index
+                    + if frag_stage && separate_sampled {
+                        FRAG_SAMPLED_RESOURCE_BINDING_OFFSET
+                    } else {
+                        0
+                    };
+                if writable.contains(frag_stage, binding) {
+                    return Ok(());
+                }
+                if crate::runtime::spirv_bind::image_format(
+                    if frag_stage { &f_words } else { &v_words },
+                    binding,
+                )
+                .is_none()
+                {
+                    // The compiler can eliminate a declared AIR texture while
+                    // retaining its reflection metadata. Do not stage unused
+                    // bindings; full descriptor validation still runs later.
                     return Ok(());
                 }
                 // Measure-only setup_tex sub-split (off-main-core): time the full
@@ -4943,7 +5029,9 @@ fn try_metal2vulkan_draw<M: HostMemory + HostOps>(
         // elision, so revalidating by re-reading would move ~237 GB of guest
         // memory a session. The bitmap answers the same question in a word.
         if !chain_load_from_target {
-            if let (Some(c0), Some(identity)) = (req.colors.first(), texture_resident_target.as_ref()) {
+            if let (Some(c0), Some(identity)) =
+                (req.colors.first(), texture_resident_target.as_ref())
+            {
                 if c0.load_action == PASS_LOAD_ACTION_LOAD
                     && c0.target_seed_rgba.is_none()
                     && crate::backend::vulkan::engine::resident_content_ready(identity)
@@ -5127,7 +5215,9 @@ fn try_metal2vulkan_draw<M: HostMemory + HostOps>(
         resources.vertex_attributes = attrs;
         resources.storage_buffers = storage;
         resources.sampled_images = images;
+        resources.storage_images = std::mem::take(&mut writable.images);
         resources.color_input = frag_color_input;
+        resources.secondary_color_inputs = secondary_color_inputs;
         resources.samplers = samplers;
         // Load seed always goes to the GPU (workstream D3). Premult One/OMSA is
         // hardware blend over the Load-seeded target — identical math to the
@@ -5650,7 +5740,13 @@ fn try_metal2vulkan_draw<M: HostMemory + HostOps>(
         // the boundary below names the engine's specific check as the primary
         // `reason=` rather than flattening it into a `vk_engine: {e}` blob.
         crate::runtime::chain_phase::enter(crate::runtime::chain_phase::Phase::Engine);
-        let out = crate::backend::vulkan::engine::execute_draw_request(&resources)?;
+        let mut out = crate::backend::vulkan::engine::execute_draw_request(&resources)?;
+        writable.writeback(
+            state,
+            host,
+            req.task_id,
+            std::mem::take(&mut out.storage_images),
+        )?;
         // Everything from here to the end of the chain is Store routing, and the
         // `?` above deliberately leaves a declined draw charged to `engine`:
         // where it declined is the engine's own typed reason to report, not this

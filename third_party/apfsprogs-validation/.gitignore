@@ -1,0 +1,10 @@
+*.swp
+*.d
+*.o
+*.a
+/apfsck/apfsck
+/mkapfs/mkapfs
+/apfs-snap/apfs-snap
+/apfs-label/apfs-label
+/tags
+version.h

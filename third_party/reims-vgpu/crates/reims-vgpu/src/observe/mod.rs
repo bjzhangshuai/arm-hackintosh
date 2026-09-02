@@ -55,6 +55,7 @@
 //! speculative returns (a resolver legitimately answering "not ready yet" every
 //! poll, a genuinely-unbound `ref==0`). Those flood the log.
 
+pub(crate) mod artifact;
 pub mod decline;
 pub mod emit;
 pub mod footprint;

@@ -311,17 +311,22 @@ declare i1 @air.is_null_texture_2d(ptr addrspace(1))
 fn native_kernel_texture_sampler_metadata_bindings() {
     let ll = r#"
 target triple = "spirv-unknown-vulkan1.3"
-define void @k(ptr addrspace(1) %tex, ptr addrspace(2) %sampler) {
+define void @k(ptr addrspace(1) %tex, ptr addrspace(2) %sampler, ptr addrspace(1) %out) {
 entry:
+  %sample = tail call { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1) %tex, ptr addrspace(2) %sampler, <2 x float> zeroinitializer, i1 true, <2 x i32> zeroinitializer, i1 false, float 0.000000e+00, float 0.000000e+00, i32 0)
+  %color = extractvalue { <4 x float>, i8 } %sample, 0
+  store <4 x float> %color, ptr addrspace(1) %out, align 16
   ret void
 }
+declare { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1), ptr addrspace(2), <2 x float>, i1, <2 x i32>, i1, float, float, i32)
 
 !air.kernel = !{!0}
 !0 = !{ptr @k, !1, !2}
 !1 = !{}
-!2 = !{!3, !4}
-!3 = !{i32 0, !"air.texture", !"air.location_index", i32 5, i32 1, !"air.read", !"air.arg_type_name", !"texture2d<float, read>", !"air.arg_name", !"tex"}
+!2 = !{!3, !4, !5}
+!3 = !{i32 0, !"air.texture", !"air.location_index", i32 5, i32 1, !"air.sample", !"air.arg_type_name", !"texture2d<float, sample>", !"air.arg_name", !"tex"}
 !4 = !{i32 1, !"air.sampler", !"air.location_index", i32 2, i32 1, !"air.arg_type_name", !"sampler", !"air.arg_name", !"sampler"}
+!5 = !{i32 2, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.write", !"air.address_space", i32 1, !"air.arg_type_name", !"float4*", !"air.arg_name", !"out"}
 "#;
     let tmp = std::env::temp_dir().join(format!(
         "metal2vulkan_kernel_texture_sampler_{}",
@@ -338,6 +343,7 @@ entry:
     assert!(asm.contains("OpTypeSampler"), "{asm}");
     assert!(asm.contains("Binding 37"), "{asm}");
     assert!(asm.contains("Binding 66"), "{asm}");
+    assert!(asm.contains("OpImageSampleExplicitLod"), "{asm}");
     if std::process::Command::new("spirv-val")
         .arg("--version")
         .output()
@@ -1638,7 +1644,7 @@ declare { <4 x float>, i8 } @air.gather_depth_2d_array.v4f32(ptr addrspace(1), p
 }
 
 #[test]
-fn native_kernel_unused_texture1d_uses_metadata_dimension() {
+fn native_kernel_unused_texture1d_does_not_require_a_descriptor() {
     let ll = r#"
 target triple = "spirv-unknown-vulkan1.3"
 
@@ -1662,9 +1668,9 @@ entry:
     let _ = std::fs::create_dir_all(&tmp);
     let spv = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate");
     let asm = disassemble(&spv).expect("disassemble");
-    assert!(asm.contains("OpTypeImage"), "{asm}");
-    assert!(asm.contains(" 1D "), "{asm}");
-    assert!(asm.contains("Binding 32"), "{asm}");
+    assert!(!asm.contains("OpTypeImage"), "{asm}");
+    assert!(!asm.contains("Binding 32"), "{asm}");
+    assert!(asm.contains("OpStore"), "{asm}");
     if std::process::Command::new("spirv-val")
         .arg("--version")
         .output()
@@ -1672,6 +1678,64 @@ entry:
     {
         tools::spirv_val_bytes(&spv, &tmp).expect("spirv-val");
     }
+    std::fs::remove_dir_all(tmp).expect("remove test scratch");
+}
+
+#[test]
+fn native_fragment_dead_descriptor_loads_keep_live_texture_read() {
+    // No air.arg_unused hint: use-def structure, not metadata names, decides liveness.
+    let ll = r#"
+target triple = "spirv-unknown-vulkan1.3"
+define <4 x float> @f(ptr addrspace(1) %source, ptr addrspace(1) %unused, ptr addrspace(2) %s) {
+entry:
+  %sample = tail call { <4 x float>, i8 } @air.read_texture_2d.v4f32(ptr addrspace(1) %source, <2 x i32> zeroinitializer, i32 0, i32 3)
+  %color = extractvalue { <4 x float>, i8 } %sample, 0
+  ret <4 x float> %color
+}
+declare { <4 x float>, i8 } @air.read_texture_2d.v4f32(ptr addrspace(1), <2 x i32>, i32, i32)
+!air.fragment = !{!0}
+!0 = !{ptr @f, !1, !3}
+!1 = !{!2}
+!2 = !{!"air.render_target", i32 0, i32 0, !"air.arg_type_name", !"float4"}
+!3 = !{!4, !5, !6}
+!4 = !{i32 0, !"air.texture", !"air.location_index", i32 0, i32 1, !"air.sample", !"air.arg_type_name", !"texture2d<float, sample>", !"air.arg_name", !"source"}
+!5 = !{i32 1, !"air.texture", !"air.location_index", i32 1, i32 1, !"air.sample", !"air.arg_type_name", !"texture2d<float, sample>", !"air.arg_name", !"unused"}
+!6 = !{i32 2, !"air.sampler", !"air.location_index", i32 0, i32 1, !"air.arg_type_name", !"sampler", !"air.arg_name", !"s"}
+"#;
+    let tmp = std::env::temp_dir().join(format!(
+        "metal2vulkan_dead_descriptor_loads_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&tmp).expect("test scratch");
+    let spv = crate::translate_sanitized_native(ll, Stage::Fragment, &tmp).expect("translate");
+    let asm = disassemble(&spv).expect("disassemble");
+    assert!(asm.contains("OpImageFetch"), "{asm}");
+    assert!(asm.contains("Binding 32"), "{asm}");
+    assert!(!asm.contains("Binding 33"), "{asm}");
+    assert!(!asm.contains("Binding 64"), "{asm}");
+    assert!(!asm.contains("OpTypeSampler"), "{asm}");
+    let module = load_bytes(&spv).expect("load");
+    let descriptor = module.annotations.iter().find_map(|inst| {
+        match inst.operands.as_slice() {
+            [Operand::IdRef(id), Operand::Decoration(Decoration::Binding),
+             Operand::LiteralBit32(32)] => Some(*id),
+            _ => None,
+        }
+    }).expect("live descriptor");
+    assert!(
+        module.entry_points[0]
+            .operands
+            .contains(&Operand::IdRef(descriptor)),
+        "{asm}"
+    );
+    if std::process::Command::new("spirv-val")
+        .arg("--version")
+        .output()
+        .is_ok()
+    {
+        tools::spirv_val_bytes(&spv, &tmp).expect("spirv-val");
+    }
+    std::fs::remove_dir_all(tmp).expect("remove test scratch");
 }
 
 #[test]

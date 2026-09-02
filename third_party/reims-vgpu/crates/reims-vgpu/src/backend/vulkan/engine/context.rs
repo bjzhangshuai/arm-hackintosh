@@ -257,6 +257,7 @@ pub(crate) struct DeviceContext {
     /// physical device, and the previous code re-queried it through the loader
     /// on every single allocation.
     pub memory_properties: vk::PhysicalDeviceMemoryProperties,
+    pub limits: vk::PhysicalDeviceLimits,
     /// Queue family used for all engine submits (graphics draws + compute).
     pub gq: u32,
     /// True when `gq` supports both GRAPHICS and COMPUTE (required for engine compute).
@@ -560,6 +561,7 @@ impl DeviceContext {
         // These three are built in `caps` too. They are bound to locals here
         // only because `push_next` borrows them for the lifetime of `dci`.
         let mut en_feedback_loop = features.enabled_attachment_feedback_loop_layout();
+        let mut en_demote = features.enabled_shader_demote();
         let mut dci = vk::DeviceCreateInfo::default()
             .queue_create_infos(&qci)
             .enabled_features(&enabled)
@@ -571,6 +573,9 @@ impl DeviceContext {
         }
         if has_attachment_feedback_loop_layout {
             dci = dci.push_next(&mut en_feedback_loop);
+        }
+        if features.shader_demote_to_helper_invocation {
+            dci = dci.push_next(&mut en_demote);
         }
         let device = instance
             .create_device(pd, &dci, None)
@@ -677,6 +682,7 @@ impl DeviceContext {
             device,
             caps,
             memory_properties,
+            limits: props.limits,
             gq,
             compute_capable,
             storage_image_write_without_format: storage_image_write_without_format_bgra,

@@ -6,6 +6,10 @@ class GDBPythonSyntaxTests(unittest.TestCase):
     def test_embedded_python_blocks_compile_without_executing(self):
         root = Path(__file__).resolve().parents[1] / 'tools'
         for name in ('probe_allproc_names_live.gdb',
+                     'watch_native_qemu_crash.gdb',
+                     'probe_boot117_pvg_objects.gdb',
+                     'watch_boot117_texture_descriptor.gdb',
+                     'watch_boot116_user_crash.gdb',
                      'probe_timebase_live.gdb',
                      'inject_basesystem_auth_and_boot_args_trace_mount.gdb',
                      'trace_basesystem_symlink_preflight_live.gdb'):

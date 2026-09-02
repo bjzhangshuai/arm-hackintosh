@@ -30,6 +30,8 @@ pub const MTL_FORMAT_R32_UINT: u16 = 0x35;
 pub const MTL_FORMAT_R32_SINT: u16 = 0x36;
 pub const MTL_FORMAT_R32_FLOAT: u16 = 0x37;
 pub const MTL_FORMAT_RG16_FLOAT: u16 = 0x41;
+/// MTLPixelFormatRG16Uint = 63 in the macOS 26.2 SDK's MTLPixelFormat.h.
+pub const MTL_FORMAT_RG16_UINT: u16 = 0x3f;
 pub const MTL_FORMAT_RGBA8_UNORM: u16 = 0x46;
 pub const MTL_FORMAT_RGBA8_UNORM_SRGB: u16 = 0x47;
 pub const MTL_FORMAT_RGBA8_UINT: u16 = 0x49;
@@ -121,6 +123,9 @@ pub enum TexelLayout {
     /// Four bytes wide but **not** a colour order, so it stays out of the
     /// RGBA8-shaped loaders and `is_four_byte_color`.
     R32Float,
+    /// Two unsigned 16-bit integer channels. Four bytes wide, but not RGBA8:
+    /// normalization, byte swapping and color conversion would change values.
+    Rg16Uint,
 }
 
 impl TexelLayout {
@@ -132,6 +137,7 @@ impl TexelLayout {
             Self::Rg8 => RG8_BPP,
             Self::R16Float => R16F_BPP,
             Self::R32Float => R32F_BPP,
+            Self::Rg16Uint => 4,
         }
     }
 
@@ -195,7 +201,7 @@ pub fn bytes_per_pixel(format: u16) -> Option<u32> {
     Some(match format {
         MTL_FORMAT_A8_UNORM | MTL_FORMAT_R8_UNORM | MTL_FORMAT_STENCIL8 => R8_BPP,
         MTL_FORMAT_R16_FLOAT | MTL_FORMAT_RG8_UNORM | MTL_FORMAT_DEPTH16_UNORM => RG8_BPP,
-        MTL_FORMAT_RG16_FLOAT => RG16F_BPP,
+        MTL_FORMAT_RG16_FLOAT | MTL_FORMAT_RG16_UINT => RG16F_BPP,
         MTL_FORMAT_RGBA8_UNORM
         | MTL_FORMAT_RGBA8_UNORM_SRGB
         | MTL_FORMAT_RGBA8_UINT
@@ -1388,6 +1394,7 @@ mod tests {
             TexelLayout::Rg8,
             TexelLayout::R16Float,
             TexelLayout::R32Float,
+            TexelLayout::Rg16Uint,
         ] {
             let mtl = match layout {
                 TexelLayout::Rgba8 => MTL_FORMAT_RGBA8_UNORM,
@@ -1396,6 +1403,7 @@ mod tests {
                 TexelLayout::Rg8 => MTL_FORMAT_RG8_UNORM,
                 TexelLayout::R16Float => MTL_FORMAT_R16_FLOAT,
                 TexelLayout::R32Float => MTL_FORMAT_R32_FLOAT,
+                TexelLayout::Rg16Uint => MTL_FORMAT_RG16_UINT,
             };
             assert_eq!(
                 Some(layout.bytes_per_texel()),
@@ -1409,7 +1417,10 @@ mod tests {
             // quantize the transfer curve. Pinned here because it is an
             // *absence*, and an absence is what a later "just add the missing
             // arm" edit removes without noticing what it was for.
-            let expects_loader = !matches!(layout, TexelLayout::R16Float | TexelLayout::R32Float);
+            let expects_loader = !matches!(
+                layout,
+                TexelLayout::R16Float | TexelLayout::R32Float | TexelLayout::Rg16Uint
+            );
             assert_eq!(
                 sampled_class(mtl).is_some(),
                 expects_loader,

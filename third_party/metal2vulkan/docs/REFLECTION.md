@@ -11,6 +11,13 @@ Reflection is a pure re-shaping of AIR metadata the translator already parsed. I
 
 ## Getting reflection
 
+For analyses of the serialized shader, `spirv_instruction_references(&words)`
+returns grammar-decoded ID operands in instruction order. It excludes literals,
+enum values, strings, result definitions and result types; it does not validate
+control flow or infer access permissions. Unsupported/malformed inputs return an
+error. Comparing every raw operand word to an ID is not a valid substitute: a
+32-bit type width or literal binding number may equal a resource's SSA ID.
+
 ### Library
 
 ```rust
@@ -131,6 +138,10 @@ Top-level fields:
 
 **Gaps consumers should expect:**
 
+- **Declared versus live resources:** reflection describes AIR metadata, not optimized SPIR-V
+  liveness. Finalization removes unused, non-volatile direct opaque descriptor loads and their
+  dead variables; reflected unused textures/samplers may therefore be absent from SPIR-V.
+  Actual image operations and escaped handles remain live. Reflection's binding ABI is unchanged.
 - **Device buffer R/W:** precise read-vs-write often needs SPIR-V dataflow; many buffers have
   `access: None`. Prefer IR analysis or treat as read-write unless `address_space` is constant.
 - **Function constants from meta-only builders:** `from_*` constructors leave

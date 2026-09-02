@@ -55,6 +55,17 @@ def write_fake_apfs(
 
 
 class VMAppleISCImageTests(unittest.TestCase):
+    def test_complete_isc_roles_and_checkpoint_copies(self):
+        records = [{"uuid": str(uuid.uuid4()), "name": name, "role": role}
+                   for name, role in (("xART", 0x100), ("iSCPreboot", 0x10), ("Hardware", 0x140))]
+        self.assertEqual(len(ISC.validate_isc_volumes(records + records)), 3)
+        for bad in (records[:2], records[1:], [],
+                    records + [{**records[0], "uuid": str(uuid.uuid4())}],
+                    [{**records[0], "name": "wrong"}, *records[1:]],
+                    [records[0], {**records[1], "uuid": records[0]["uuid"]}, records[2]]):
+            with self.subTest(bad=bad), self.assertRaises(ISC.ISCImageError):
+                ISC.validate_isc_volumes(bad)
+
     def test_constants_match_apfs_boot_util_storage_contract(self) -> None:
         self.assertEqual(
             str(ISC.ISC_PARTITION_TYPE), "69646961-6700-11aa-aa11-00306543ecac"

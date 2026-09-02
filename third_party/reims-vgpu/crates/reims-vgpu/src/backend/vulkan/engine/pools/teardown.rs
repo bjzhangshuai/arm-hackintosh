@@ -40,11 +40,6 @@ impl ResourcePools {
         for s in self.staging_live.drain(..) {
             release_buffer_slot(device, &mut self.host_slab, s);
         }
-        for list in self.readback_free.values_mut() {
-            for s in list.drain(..) {
-                release_buffer_slot(device, &mut self.host_slab, s);
-            }
-        }
         if let Some(s) = self.readback_live.take() {
             release_buffer_slot(device, &mut self.host_slab, s);
         }
@@ -78,6 +73,13 @@ impl ResourcePools {
             std::thread::yield_now();
         }
         self.reclaim_returned_readback_leases();
+        // Reclaim moves returned leases into the free lists. Drain only after
+        // that transition or teardown strands their buffers and allocations.
+        for list in self.readback_free.values_mut() {
+            for s in list.drain(..) {
+                release_buffer_slot(device, &mut self.host_slab, s);
+            }
+        }
         for l in self.readback_leased.drain(..) {
             release_buffer_slot(device, &mut self.host_slab, l.slot);
         }

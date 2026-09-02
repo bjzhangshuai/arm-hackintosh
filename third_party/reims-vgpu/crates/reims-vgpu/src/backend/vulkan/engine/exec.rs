@@ -892,6 +892,102 @@ unsafe fn upload_buffer_to_sampled_image(
     );
 }
 
+/// Snapshot the destination defined by a render-pass load action. A LOAD
+/// copies resident texels with a producer-write dependency; a CLEAR fills the
+/// input image in its own format. Both leave an immutable input attachment.
+unsafe fn prepare_fetch_snapshot(
+    ctx: &super::context::DeviceContext,
+    cb: vk::CommandBuffer,
+    snapshot: &SampledSlot,
+    source: Option<(vk::Image, vk::ImageLayout)>,
+    clear: [f32; 4],
+) {
+    let range = super::color_subresource_range();
+    let mut before = vec![vk::ImageMemoryBarrier::default()
+        .src_access_mask(vk::AccessFlags::empty())
+        .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+        .old_layout(vk::ImageLayout::UNDEFINED)
+        .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+        .image(snapshot.image)
+        .subresource_range(range)];
+    if let Some((image, layout)) = source {
+        before.push(
+            vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE)
+                .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                .old_layout(layout)
+                .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                .image(image)
+                .subresource_range(range),
+        );
+    }
+    ctx.device.cmd_pipeline_barrier(
+        cb,
+        vk::PipelineStageFlags::ALL_COMMANDS,
+        vk::PipelineStageFlags::TRANSFER,
+        vk::DependencyFlags::empty(),
+        &[],
+        &[],
+        &before,
+    );
+    if let Some((image, _)) = source {
+        let copy = vk::ImageCopy::default()
+            .src_subresource(super::color_subresource_layers())
+            .dst_subresource(super::color_subresource_layers())
+            .extent(vk::Extent3D {
+                width: snapshot.width,
+                height: snapshot.height,
+                depth: 1,
+            });
+        ctx.device.cmd_copy_image(
+            cb,
+            image,
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            snapshot.image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &[copy],
+        );
+    } else {
+        ctx.device.cmd_clear_color_image(
+            cb,
+            snapshot.image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &vk::ClearColorValue { float32: clear },
+            &[range],
+        );
+    }
+    let mut after = vec![vk::ImageMemoryBarrier::default()
+        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+        .dst_access_mask(vk::AccessFlags::INPUT_ATTACHMENT_READ)
+        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        .image(snapshot.image)
+        .subresource_range(range)];
+    if let Some((image, _)) = source {
+        after.push(
+            vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+                .dst_access_mask(
+                    vk::AccessFlags::COLOR_ATTACHMENT_READ
+                        | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                )
+                .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .image(image)
+                .subresource_range(range),
+        );
+    }
+    ctx.device.cmd_pipeline_barrier(
+        cb,
+        vk::PipelineStageFlags::TRANSFER,
+        vk::PipelineStageFlags::FRAGMENT_SHADER | vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+        vk::DependencyFlags::empty(),
+        &[],
+        &[],
+        &after,
+    );
+}
+
 fn draw_has_no_invocations(req: &DrawRequest) -> bool {
     let element_count = req
         .indexed
@@ -912,11 +1008,37 @@ pub(crate) unsafe fn execute_draw_inner(
     // `Drop`, so the `?` returns below keep their time.
     let mut phase = super::draw_phase::DrawTimer::start();
     validate_v1(req)?;
+    if let Err(decline) = super::descriptor_contract::check(req) {
+        use crate::observe::artifact::{self, Kind};
+        if artifact::enabled() {
+            // The contract gate runs before pipeline creation. Capture here,
+            // not only on vkCreateGraphicsPipelines failure, or the rejected
+            // module is gone before its access graph can be inspected.
+            let images: Vec<_> = req
+                .sampled_images
+                .iter()
+                .map(|i| {
+                    (
+                        i.binding, i.width, i.height, i.layers, i.format, i.arrayed, i.volume,
+                        i.cube, i.one_dim,
+                    )
+                })
+                .collect();
+            let metadata = format!("decline={decline:?}\nimages={images:?}\nsamplers={:?}\ncolor_input={} secondary_inputs={}\n",
+                req.samplers.iter().map(|s| s.binding).collect::<Vec<_>>(),
+                req.color_input, req.secondary_color_inputs);
+            artifact::capture_shader(Kind::VertexShader, &metadata, &req.vert_spirv);
+            artifact::capture_shader(Kind::FragmentShader, &metadata, &req.frag_spirv);
+        }
+        return Err(DrawError::DescriptorContract(decline));
+    }
     let force_loss = owner.force_device_lost;
     if force_loss {
         owner.force_device_lost = false;
     }
     let ctx = owner.ensure(counters)?;
+    super::descriptor_contract::check_limits(req, &ctx.limits)
+        .map_err(DrawError::DescriptorContract)?;
     pools.ensure_init(ctx, counters)?;
 
     // Draw batching (deferred submit): a draw that hands the CPU nothing
@@ -955,6 +1077,7 @@ pub(crate) unsafe fn execute_draw_inner(
         && !ctx.caps.quirks.no_deferred_draw_batching
         && !is_mrt
         && !has_zc_sampled
+        && req.storage_images.is_empty()
         && req.depth.is_none()
         && req.skip_readback
         && req.target_identity.is_some();
@@ -1007,6 +1130,13 @@ pub(crate) unsafe fn execute_draw_inner(
             stages: (vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT).as_raw(),
         });
     }
+    for b in &req.storage_images {
+        layout_bindings.push(BindingSig {
+            binding: b.binding,
+            ty: vk::DescriptorType::STORAGE_IMAGE.as_raw() as u32,
+            stages: (vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT).as_raw(),
+        });
+    }
     for b in &req.samplers {
         layout_bindings.push(BindingSig {
             binding: b.binding,
@@ -1020,6 +1150,15 @@ pub(crate) unsafe fn execute_draw_inner(
             ty: vk::DescriptorType::INPUT_ATTACHMENT.as_raw() as u32,
             stages: vk::ShaderStageFlags::FRAGMENT.as_raw(),
         });
+    }
+    for i in 1..8 {
+        if req.secondary_color_inputs & (1 << i) != 0 {
+            layout_bindings.push(BindingSig {
+                binding: super::types::COLOR_INPUT_BINDING + i,
+                ty: vk::DescriptorType::INPUT_ATTACHMENT.as_raw() as u32,
+                stages: vk::ShaderStageFlags::FRAGMENT.as_raw(),
+            });
+        }
     }
     layout_bindings.sort_by_key(|b| b.binding);
     let layout_key = LayoutKey {
@@ -1064,6 +1203,7 @@ pub(crate) unsafe fn execute_draw_inner(
     }
     pass_key.secondary_count = req.secondary_targets.len() as u8;
     pass_key.color_input = req.color_input;
+    pass_key.secondary_color_inputs = req.secondary_color_inputs;
     if let Some(d) = &req.depth {
         pass_key.depth = Some(super::caches::DepthAttachKey {
             load: d.load,
@@ -1336,6 +1476,7 @@ pub(crate) unsafe fn execute_draw_inner(
     // 2D path so nothing changes there.
     let mut transient_depth: Option<(vk::Image, vk::DeviceMemory, vk::ImageView)> = None;
     let mut color_input_snapshot: Option<SampledSlot> = None;
+    let mut secondary_input_snapshots: Vec<(usize, SampledSlot)> = Vec::new();
     let acquire_color_input_snapshot =
         |pools: &mut ResourcePools| -> Result<SampledSlot, DrawError> {
             pools.acquire_sampled(
@@ -1401,10 +1542,6 @@ pub(crate) unsafe fn execute_draw_inner(
             color_input_snapshot = Some(snapshot);
         }
         for sec in &req.secondary_targets {
-            let old_layout = pools
-                .registry_get(&sec.identity)
-                .map(|s| s.layout)
-                .unwrap_or(vk::ImageLayout::UNDEFINED);
             let (img, view) = pools.registry_ensure_color(
                 ctx,
                 sec.identity.clone(),
@@ -1414,8 +1551,46 @@ pub(crate) unsafe fn execute_draw_inner(
                 sec.format,
                 counters,
             )?;
+            // Ensuring a changed format/geometry may replace the image. Its
+            // predecessor's tracked layout must not be applied to the newly
+            // allocated image, which starts UNDEFINED.
+            let old_layout = pools
+                .registry_get(&sec.identity)
+                .map(|s| s.layout)
+                .unwrap_or(vk::ImageLayout::UNDEFINED);
             views.push(view);
             mrt_secondaries.push((sec.identity.clone(), img, old_layout));
+        }
+        for (i, sec) in req.secondary_targets.iter().enumerate() {
+            if req.secondary_color_inputs & (1 << (i + 1)) == 0 {
+                continue;
+            }
+            if sec.load
+                && !pools
+                    .registry_get(&sec.identity)
+                    .is_some_and(|s| s.content_ready)
+            {
+                return Err(DrawError::DrawExecution(
+                    DrawExecutionDecline::LoadTargetContentNotReady {
+                        identity: sec.identity.clone(),
+                    },
+                ));
+            }
+            let snapshot = pools.acquire_sampled(
+                ctx,
+                sec.width,
+                sec.height,
+                1,
+                false,
+                false,
+                false,
+                false,
+                sec.format,
+                crate::contract::pixel_format::SwizzlePlan::default(),
+                counters,
+            )?;
+            views.push(snapshot.view);
+            secondary_input_snapshots.push((i, snapshot));
         }
         if let Some(depth) = req.depth {
             let (image, memory, view) = pools.create_transient_depth(
@@ -1691,6 +1866,11 @@ pub(crate) unsafe fn execute_draw_inner(
     }
 
     phase.enter(super::draw_phase::Phase::AcquireReadback);
+    let writable_images = req
+        .storage_images
+        .iter()
+        .map(|r| super::graphics_storage::Prepared::acquire(ctx, pools, counters, r))
+        .collect::<Result<Vec<_>, _>>()?;
     let rb_size = (req.width as u64) * (req.height as u64) * 4;
     let do_readback = !req.skip_readback;
     phase.note_target(req.width, req.height, if do_readback { rb_size } else { 0 });
@@ -1729,6 +1909,7 @@ pub(crate) unsafe fn execute_draw_inner(
             .iter()
             .map(|(_, s)| vk::DescriptorImageInfo::default().sampler(*s))
             .collect();
+        let writable_infos: Vec<_> = writable_images.iter().map(|i| i.descriptor()).collect();
         // Framebuffer fetch reads a pass-before snapshot attachment. The color
         // target itself remains attachment 0 and receives the fragment output.
         let color_input_view = color_input_snapshot
@@ -1738,6 +1919,14 @@ pub(crate) unsafe fn execute_draw_inner(
         let color_input_info = vk::DescriptorImageInfo::default()
             .image_view(color_input_view)
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+        let secondary_input_infos: Vec<_> = secondary_input_snapshots
+            .iter()
+            .map(|(_, s)| {
+                vk::DescriptorImageInfo::default()
+                    .image_view(s.view)
+                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            })
+            .collect();
         let mut writes = Vec::new();
         for (i, (binding, _)) in storage_slots.iter().enumerate() {
             writes.push(
@@ -1766,6 +1955,15 @@ pub(crate) unsafe fn execute_draw_inner(
                     .image_info(std::slice::from_ref(&sampler_infos[i])),
             );
         }
+        for (i, image) in writable_images.iter().enumerate() {
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(dset)
+                    .dst_binding(image.binding)
+                    .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                    .image_info(std::slice::from_ref(&writable_infos[i])),
+            );
+        }
         if req.color_input {
             writes.push(
                 vk::WriteDescriptorSet::default()
@@ -1773,6 +1971,15 @@ pub(crate) unsafe fn execute_draw_inner(
                     .dst_binding(super::types::COLOR_INPUT_BINDING)
                     .descriptor_type(vk::DescriptorType::INPUT_ATTACHMENT)
                     .image_info(std::slice::from_ref(&color_input_info)),
+            );
+        }
+        for (n, (slot, _)) in secondary_input_snapshots.iter().enumerate() {
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(dset)
+                    .dst_binding(super::types::COLOR_INPUT_BINDING + *slot as u32 + 1)
+                    .descriptor_type(vk::DescriptorType::INPUT_ATTACHMENT)
+                    .image_info(std::slice::from_ref(&secondary_input_infos[n])),
             );
         }
         ctx.device.update_descriptor_sets(&writes, &[]);
@@ -1797,6 +2004,10 @@ pub(crate) unsafe fn execute_draw_inner(
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )
             .map_err(|e| DrawError::VkCall(VkCall::new(VkOp::ExecBeginCb, e)))?;
+    }
+
+    for image in &writable_images {
+        image.before_draw(ctx, cb);
     }
 
     // Metal permits a pass to sample the same texture it renders into. Vulkan
@@ -1897,12 +2108,9 @@ pub(crate) unsafe fn execute_draw_inner(
             vk::AccessFlags::TRANSFER_WRITE,
         ))
     } else if color_input_snapshot.is_some() && load_uses_gpu_content {
-        let old_layout = if target_snapshotted {
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL
-        } else {
-            target_old_layout
-        };
-        Some(layout_source_scope(old_layout)?)
+        // A render pass can leave TRANSFER_SRC layout without a transfer
+        // ever running. Synchronize producer writes, not the layout's name.
+        Some(resident_read_source_scope())
     } else {
         None
     };
@@ -2193,24 +2401,20 @@ pub(crate) unsafe fn execute_draw_inner(
                 &target_back_to_color,
             );
         } else {
-            // Clear-with-fetch has undefined old destination contents; still put
-            // the snapshot image in the layout the render pass declares.
-            let snapshot_to_read = [vk::ImageMemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::empty())
-                .dst_access_mask(vk::AccessFlags::INPUT_ATTACHMENT_READ)
-                .old_layout(vk::ImageLayout::UNDEFINED)
-                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                .image(snapshot.image)
-                .subresource_range(super::color_subresource_range())];
-            ctx.device.cmd_pipeline_barrier(
-                cb,
-                vk::PipelineStageFlags::TOP_OF_PIPE,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &snapshot_to_read,
-            );
+            // A CLEAR load action is a defined destination value, not
+            // uninitialized memory. Framebuffer fetch observes that clear.
+            prepare_fetch_snapshot(ctx, cb, snapshot, None, req.target_clear);
+        }
+    }
+
+    for (i, snapshot) in &secondary_input_snapshots {
+        let sec = &req.secondary_targets[*i];
+        let source = sec
+            .load
+            .then_some((mrt_secondaries[*i].1, mrt_secondaries[*i].2));
+        prepare_fetch_snapshot(ctx, cb, snapshot, source, sec.clear);
+        if sec.load {
+            mrt_secondaries[*i].2 = vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
         }
     }
 
@@ -2344,7 +2548,7 @@ pub(crate) unsafe fn execute_draw_inner(
     // framebuffer-fetch inserts the pass-before snapshot at slot 1.
     let mut clear = vec![vk::ClearValue {
         color: vk::ClearColorValue {
-            float32: [0.0, 0.0, 0.0, 0.0],
+            float32: req.target_clear,
         },
     }];
     if req.color_input {
@@ -2357,6 +2561,11 @@ pub(crate) unsafe fn execute_draw_inner(
     for sec in &req.secondary_targets {
         clear.push(vk::ClearValue {
             color: vk::ClearColorValue { float32: sec.clear },
+        });
+    }
+    for _ in &secondary_input_snapshots {
+        clear.push(vk::ClearValue {
+            color: vk::ClearColorValue { float32: [0.0; 4] },
         });
     }
     // Depth attachment is last (after color + secondaries), matching the pass
@@ -2475,6 +2684,10 @@ pub(crate) unsafe fn execute_draw_inner(
     }
     ctx.device.cmd_end_render_pass(cb);
 
+    for image in &writable_images {
+        image.after_draw(ctx, cb);
+    }
+
     if let Some(ref rb) = readback {
         // The pass resolved the colour attachment to TRANSFER_SRC_OPTIMAL, so
         // this copy needs no transition — but it does need a dependency, and
@@ -2533,6 +2746,7 @@ pub(crate) unsafe fn execute_draw_inner(
         pools.recycle_staging();
         pools.recycle_readback();
         pools.recycle_sampled();
+        pools.recycle_storage_images();
         return Err(DrawError::DeviceLost(DeviceLostDecline::ForcedDraw));
     }
 
@@ -2645,6 +2859,7 @@ pub(crate) unsafe fn execute_draw_inner(
         return Ok(DrawOutput {
             pixels: Vec::new(),
             pixels_bgra: output_bgra,
+            storage_images: Vec::new(),
         });
     }
 
@@ -2699,15 +2914,16 @@ pub(crate) unsafe fn execute_draw_inner(
     // `gva_store_defer_eligible` and keeps its readback. Delete this and that
     // Store loses its frame silently, which is the one outcome the ground rules
     // forbid outright. What the equality licenses is not re-measuring it.
-    let Some(ref rb) = readback else {
+    if readback.is_none() && writable_images.is_empty() {
         counters
             .render_post_wait_skips
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return Ok(DrawOutput {
             pixels: Vec::new(),
             pixels_bgra: output_bgra,
+            storage_images: Vec::new(),
         });
-    };
+    }
 
     // Wait ONLY this draw's fence, not the whole ring. The readback copy is the
     // tail of this CB, and single-queue submission order already guarantees it
@@ -2721,18 +2937,28 @@ pub(crate) unsafe fn execute_draw_inner(
     pools.wait_entry_fence(ctx, counters, fence)?;
 
     phase.enter(super::draw_phase::Phase::Readback);
-    let out = super::pools::read_back_slot(
-        ctx,
-        rb,
-        rb_size,
-        VkOp::ExecMapReadback,
-        VkOp::ExecInvalidateReadback,
-    )?;
-    counters.note_readback(rb_size);
+    let out = if let Some(ref rb) = readback {
+        let bytes = super::pools::read_back_slot(
+            ctx,
+            rb,
+            rb_size,
+            VkOp::ExecMapReadback,
+            VkOp::ExecInvalidateReadback,
+        )?;
+        counters.note_readback(rb_size);
+        bytes
+    } else {
+        Vec::new()
+    };
+    let storage_images = writable_images
+        .iter()
+        .map(|image| image.read(ctx))
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(DrawOutput {
         pixels: out,
         pixels_bgra: output_bgra,
+        storage_images,
     })
 }
 

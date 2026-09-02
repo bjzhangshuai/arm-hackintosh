@@ -1,8 +1,9 @@
 impl ResourcePools {
     pub(crate) fn guest_reset_counts(&self) -> (usize, usize, usize, usize) {
         let sampled = self.sampled_live.len() + self.sampled_free.len() + self.sampled_cache.len();
-        let storage =
-            self.storage_image_live.len() + self.storage_image_free.len() + self.compute_storage_registry.len();
+        let storage = self.storage_image_live.len()
+            + self.storage_image_free.len()
+            + self.compute_storage_registry.len();
         (self.registry.len(), self.targets.len(), sampled, storage)
     }
 
@@ -1558,8 +1559,7 @@ impl ResourcePools {
                 &vk::BufferCreateInfo::default()
                     .size(bucket)
                     .usage(
-                        vk::BufferUsageFlags::TRANSFER_DST
-                            | vk::BufferUsageFlags::STORAGE_BUFFER,
+                        vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::STORAGE_BUFFER,
                     )
                     .sharing_mode(vk::SharingMode::EXCLUSIVE),
                 None,
@@ -1647,7 +1647,12 @@ impl ResourcePools {
         let bucket = Self::bucket(size.max(4));
         if let Some(list) = self.readback_free.get_mut(&bucket) {
             if let Some(slot) = list.pop() {
-                self.readback_live = Some(slot);
+                if let Some(previous) = self.readback_live.replace(slot) {
+                    // The prior caller may still read it or record a GPU
+                    // copy. Keep ownership until this entry retires; neither
+                    // overwrite its handle nor return it to a free list.
+                    self.readback_multi_live.push(previous);
+                }
                 return Ok(slot);
             }
         }
@@ -1661,7 +1666,9 @@ impl ResourcePools {
             VkOp::PoolsBindReadback,
             VkOp::PoolsMapReadback,
         )?;
-        self.readback_live = Some(slot);
+        if let Some(previous) = self.readback_live.replace(slot) {
+            self.readback_multi_live.push(previous);
+        }
         Ok(slot)
     }
 
@@ -2209,8 +2216,7 @@ impl ResourcePools {
         let duplicate = self.sampled_cache.iter_mut().find(|entry| {
             entry.slot.key() == slot.key()
                 && entry.fingerprint == fingerprint
-                && (fingerprint != SampledFingerprint::Gathered
-                    || entry.identity == identity)
+                && (fingerprint != SampledFingerprint::Gathered || entry.identity == identity)
         });
         if let Some(existing) = duplicate {
             if identity.is_some() {
@@ -2237,7 +2243,8 @@ impl ResourcePools {
         while self.sampled_cache.len() > SAMPLED_CACHE_CAP
             || self.sampled_cache_bytes > SAMPLED_CACHE_BYTE_CAP
         {
-            if let Some(route) = sampled_evict_route(self.sampled_cache.len(), self.sampled_cache_bytes)
+            if let Some(route) =
+                sampled_evict_route(self.sampled_cache.len(), self.sampled_cache_bytes)
             {
                 crate::runtime::drain::note_store_route(route);
             }
@@ -2565,10 +2572,7 @@ mod recycle_tests {
                 "eviction {i} within cap must recycle"
             );
         }
-        assert_eq!(
-            pools.sampled_free.count_for(&hd),
-            SAMPLED_FREE_CAP_PER_KEY
-        );
+        assert_eq!(pools.sampled_free.count_for(&hd), SAMPLED_FREE_CAP_PER_KEY);
 
         // Over the cap: caller must destroy (returns the slot); free list is
         // bounded, not grown.
@@ -2576,10 +2580,7 @@ mod recycle_tests {
             pools.try_recycle_sampled(null_slot(1920, 1080)).is_some(),
             "over-cap eviction must not recycle"
         );
-        assert_eq!(
-            pools.sampled_free.count_for(&hd),
-            SAMPLED_FREE_CAP_PER_KEY
-        );
+        assert_eq!(pools.sampled_free.count_for(&hd), SAMPLED_FREE_CAP_PER_KEY);
 
         // A different geometry has an independent cap.
         let small = null_slot(64, 64).key();
@@ -2758,10 +2759,7 @@ mod recycle_tests {
                 "displacement {i} within cap must recycle"
             );
         }
-        assert_eq!(
-            pools.target_free.count_for(&key),
-            TARGET_FREE_CAP_PER_KEY
-        );
+        assert_eq!(pools.target_free.count_for(&key), TARGET_FREE_CAP_PER_KEY);
 
         assert!(
             pools
@@ -2769,10 +2767,7 @@ mod recycle_tests {
                 .is_some(),
             "over-cap displacement must not recycle"
         );
-        assert_eq!(
-            pools.target_free.count_for(&key),
-            TARGET_FREE_CAP_PER_KEY
-        );
+        assert_eq!(pools.target_free.count_for(&key), TARGET_FREE_CAP_PER_KEY);
 
         // A different format is an independent bucket (an RGBA image cannot back
         // a BGRA attachment).
@@ -2972,7 +2967,10 @@ mod recycle_tests {
 pub(crate) fn exchange_rb_into(src: &[u8], dst: &mut [u8]) {
     let n = src.len().min(dst.len());
     let whole = n / 4 * 4;
-    for (s, d) in src[..whole].chunks_exact(4).zip(dst[..whole].chunks_exact_mut(4)) {
+    for (s, d) in src[..whole]
+        .chunks_exact(4)
+        .zip(dst[..whole].chunks_exact_mut(4))
+    {
         d.copy_from_slice(&[s[2], s[1], s[0], s[3]]);
     }
     dst[whole..n].copy_from_slice(&src[whole..n]);
