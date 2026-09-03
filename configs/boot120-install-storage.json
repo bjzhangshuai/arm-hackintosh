@@ -1,5 +1,5 @@
 {
-  "status": "Boot120 running; B012 NULL cleanup correction not yet applied; first local UI launch hit B010 tmpfs staging failure before preflight; preserved 25G83 payload being repackaged locally; combined correction prepared; OS not installed",
+  "status": "Boot120 running; B012 NULL cleanup correction not yet applied; first local UI launch hit B010 tmpfs staging failure before preflight; 25G83 local ZIP64 archive passed guest CRC; Linux backup/native validation pending; combined correction prepared; OS not installed",
   "run_directory": "/home/macvm/runs/aux-26.6/xnu-imgsrc-reims-boot120-internal-install",
   "qemu_pid_at_launch": 974460,
   "qemu_executable": "/home/macvm/src/macvm/build/qemu-boot119-graphics-storage/qemu-system-aarch64",
@@ -18,7 +18,7 @@
     "regular_file_bytes": 19202615016,
     "preservation": "verified APFS clone, same volume; not independent-disk backup",
     "working_guest_path": "/Volumes/macos26/macvm-local-product-25G83",
-    "archive_status": "19,203,380,932-byte local ZIP64 archive written; full guest CRC verification in progress; not yet accepted",
+    "archive_status": "guest full CRC passed; UpdateBundle.zip and LOCAL_ARCHIVE_READY observed; isolated Linux backup still transferring; native inventory check and installer launch pending",
     "archive_bytes": 19203380932,
     "large_remote_os_download_authorized": false
   },

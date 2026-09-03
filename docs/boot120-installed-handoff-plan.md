@@ -26,6 +26,20 @@ Do not substitute the older, unmodified vendored QEMU source when checking this.
   Boot120 already uses this contract for AUX/iSC coherence. Raw backends sharing
   a file require deliberate locking/share settings; do not copy an untested
   double-open command line or silently disable locking for unrelated files.
+- The exact local/isolated-Linux source files now match by SHA-256. In
+  `hw/core/qdev-properties-system.c:set_drive_helper`, passing a block **node**
+  name creates a separate frontend BlockBackend over the existing node; passing
+  an already-attached backend ID fails. `hw/block/block.c:blkconf_apply_backend_options`
+  permits a second writer only when `share-rw=on`. This suggests a single raw
+  node shared by firmware and OS frontends can avoid double-opening the file.
+  It is a source-established candidate, **not a validated continuation command**;
+  the final graph must be tested with disposable fixtures before using installed
+  data. No additional QEMU process or disk-graph mutation was performed here.
+- Do not try to instantiate BDIF with `-device` under an unrelated machine for
+  that fixture: `hw/core/sysbus.c` defaults SysBus devices to
+  `user_creatable=false`, and BDIF does not override it. The future test must
+  model the real board initialization or explicitly limit its claim to block
+  sharing semantics; a generic-device test is not a vmapple boot test.
 - `docs/system/arm/vmapple.rst` also presents the system disk through both
   firmware pflash and OS virtio. That document's old macOS-12/HVF example is
   storage-contract evidence, **not** proof that 26.6.2/TCG cold boot works.

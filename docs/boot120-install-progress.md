@@ -449,3 +449,57 @@ archive is still `.zip64.partial` until this check passes. QMP at 11:31:27 UTC
 reports running, target I/O ok, zero failed reads/writes and no native crash.
 A one-shot exact-length backup receiver is now listening on isolated Linux
 loopback 18567; no upload/backup-completion claim follows from that listener.
+
+The backup now overlaps the still-running guest CRC test. The candidate export
+requires the exact closed archive size, the observed read-only unzip PID 8673
+and parent 8506, and a stable device/inode/size/mtime across upload (allowing only
+the packer's atomic rename of that same inode after CRC). The receiver remains
+exclusive-create and exact-length. A received candidate is **not** an accepted
+installer archive: guest CRC/promotion and full native Linux ZIP64/CRC/inventory
+validation are still required. This changes no payload content and causes no
+remote OS download. The current local copy is incomplete; don't claim backup
+success from its existence.
+
+The subsequent explicit guest status check observes `UpdateBundle.zip`
+(19,203,380,932 bytes) and `LOCAL_ARCHIVE_READY` (29 bytes), with no `.partial`
+or active unzip. The served `b012-z64-v2.sh` and the recorded packer match SHA-256
+4472eaf44cf366bd9acac66108612d6a698b2f71b26714275a9793756820d88d;
+that path only promotes the file and writes the marker after full CRC succeeds
+and the unused static-unarchive preference is restored. A complete-log search
+also confirms the explicit full-archive "No errors detected" message,
+`MACVM_BOOT120_ZIP64_ARCHIVE_CRC_VALID` and `MACVM_BOOT120_ZIP64_PACK_END`.
+The Linux copy remains incomplete and its native inventory/CRC check is pending.
+
+A preparatory launcher-script fetch lost the first typed `c` under the loaded
+VNC session (`url: command not found`, observed screenshot 76). It did **not**
+launch an installer. The input is being re-staged with explicit line clearing,
+a pause and a harmless leading space; actual launch remains gated on validated
+assets and the combined compatibility session.
+
+The explicit archive preflight at guest 11:55:16 UTC confirms: the static
+preference is absent again; staging anchor/exec/tmp and the one retained exec
+child already have `restricted`; tmp contains no stale child; no InstallAssistant,
+UpdateBrain, helper or unzip remains. Only the deliberate local-copy curl runs.
+The staged `/tmp/l2` launcher MD5 is 6bb68b9e3b6f22b7d464f5263bc40c1c, matching
+the repository script. These checks do not claim B010's missing getattr response
+is fixed; the combined session is still needed for the upcoming launch.
+
+`guest-clean-boot120-rejected-archive.sh` is prepared but **not executed**. After
+both replacement CRC and the exact Linux backup/native validation report pass,
+it will preserve the rejected ZIP's prefix/central-directory/footer and remove
+only the identified task-generated 19,204,730,974-byte invalid archive. All source
+assets, the valid archive and the Linux copy remain. Its Linux syntax and
+outside-ARM refusal check pass; it never touched the current guest's files.
+
+### Pre-launch debugger lifetime correction
+
+Read-only review of the old live `tmpfs-metadata-compat.log` found an actual
+normal limit stop: create=132, existing=2, extflags=8710, observed=100001. The
+initial combined script would have removed **both** guards at that point, before
+the later B012 cleanup. This was corrected before launching any new installer:
+metadata records an explicit limit/error reason; only a normal metadata limit
+retires its own breakpoints and permits one further continue with the one-shot
+NULL guard retained. Any metadata contract error, unknown stop, SIGINT or actual
+NULL correction ends the session and detaches as before. No budget is enlarged
+and existing-bundle relabelling stays disabled. Five new lifetime regression
+cases pass; the focused isolated-Linux suite now has **87 passing tests**.

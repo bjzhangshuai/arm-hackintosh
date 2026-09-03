@@ -276,7 +276,7 @@ See `docs/boot120-install-progress.md` for current evidence; Boot119 below is hi
   local working product was assembled. Full control-flow review disproved the
   initial static-directory assumption for Recovery: getenv at 0x7560 branches
   before the static preference at 0x7660, using Recovery's own mutable-product
-  paths instead. The normal local UpdateBundle ZIP route is now being prepared.
+  paths instead. A normal local UpdateBundle ZIP route is now prepared.
   The original downloaded PKG was removed by Apple's
   successful payload-disposal operation, not by this repair.
 - **First local UI launch:** Unchanged secondary InstallAssistant PID 8206 and
@@ -286,12 +286,25 @@ See `docs/boot120-install-progress.md` for current evidence; Boot119 below is hi
   attribute/staging failure, before B012. The helper then exited normally; no
   target selection or fresh OS payload download occurred. Do not label the
   failed startup a completed local installation path.
-- **Next bounded experiment:** Finish and CRC-check a local ZIP of the retained
-  unchanged payload, restore the unused static-path preference, then use one
+- **Offline archive state:** The first ditto archive wrapped 32-bit ZIP directory
+  offsets and was rejected without giving it to the installer. The replacement
+  uses the existing libarchive ZIP64 writer; the same-library tiny read/write
+  probe passed. The full 19,203,380,932-byte archive subsequently passed guest
+  CRC, was promoted to `UpdateBundle.zip`, and has `LOCAL_ARCHIVE_READY` after
+  restoring the unused static preference. Its separate isolated-Linux copy and
+  native ZIP64/CRC/inventory check are still pending. No large remote OS payload
+  was downloaded by this local preparation.
+- **Next bounded experiment:** Complete and verify the local backup, then use one
   debugger session for the existing B010 metadata contract plus one B012 cleanup
   correction. `tools/bridge_boot120_local_install.py` preserves both scopes and
   budgets; no old/unknown bundle relabelling is enabled. The focused suite has
-  **67 passing isolated-Linux tests**, including detach-on-SIGINT/error tests.
+  **87 passing isolated-Linux tests**, including detach-on-SIGINT/error tests.
+  Prior `tmpfs-metadata-compat.log` proves the metadata observation budget was
+  actually exhausted (100001 observations). The combined session now retires
+  only metadata breakpoints on that explicit normal limit, keeping the separate
+  one-shot NULL guard active. It never continues a contract error, unknown stop,
+  SIGINT or completed NULL correction. This prevents the metadata lifetime from
+  silently disarming the later preflight correction.
   Actual local preflight/installation still requires live acceptance. No
   automatic follow-up, reboot loop or security-decision alteration is authorized.
 - **Private evidence:** `boot120-personalization-20260903-logs.tar.gz`,

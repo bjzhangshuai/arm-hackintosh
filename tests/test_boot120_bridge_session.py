@@ -42,6 +42,15 @@ class BridgeSessionTests(unittest.TestCase):
             if command == 'continue':
                 if fail == 'interrupt': raise KeyboardInterrupt()
                 if fail == 'continue': raise ValueError('continue refused')
+                if fail in ('metadata-limit', 'limit-then-interrupt'):
+                    if self.events.count('continue') == 1:
+                        metadata.stop_reason = 'limit'
+                        return
+                    if fail == 'limit-then-interrupt': raise KeyboardInterrupt()
+                if fail in ('metadata-error-stop', 'other-stop'):
+                    metadata.stop_reason = 'error' if fail == 'metadata-error-stop' else None
+                    return
+                if fail == 'repaired-with-limit': metadata.stop_reason = 'limit'
                 cleanup.repaired = True
             if command == 'detach': inferior.pid = 0
 
@@ -49,6 +58,7 @@ class BridgeSessionTests(unittest.TestCase):
                                   CF_NULL=0x187C59468, repaired=False)
         metadata = SimpleNamespace(install_breakpoints=install,
                     remove_breakpoints=lambda: self.events.append('metadata-remove'),
+                    stop_reason=None,
                     counts={'create': 0, 'existing': 0, 'extflags': 0, 'observed': 0})
         fakegdb = SimpleNamespace(BP_HARDWARE_BREAKPOINT=1, execute=execute,
                     selected_inferior=lambda: inferior, write=lambda text: None)
@@ -100,3 +110,27 @@ class BridgeSessionTests(unittest.TestCase):
             with self.subTest(name=name), self.assertRaises(RuntimeError):
                 self.run_session(environment={k: v for k, v in ENV.items() if k != name})
             self.assertEqual(self.events, [])
+
+    def test_metadata_budget_retires_only_metadata_before_null_guard_finishes(self):
+        self.run_session(fail='metadata-limit')
+        self.assertEqual(self.events, ['attach', 'metadata-install', 'continue',
+                                      'metadata-remove', 'continue', 'null-delete',
+                                      'metadata-remove', 'detach'])
+
+    def test_metadata_error_must_not_resume(self):
+        self.run_session(fail='metadata-error-stop')
+        self.assertEqual(self.events.count('continue'), 1)
+        self.assertEqual(self.events[-3:], ['null-delete', 'metadata-remove', 'detach'])
+
+    def test_unknown_stop_must_not_resume(self):
+        self.run_session(fail='other-stop')
+        self.assertEqual(self.events.count('continue'), 1)
+
+    def test_interrupt_after_metadata_retirement_still_cleans_up(self):
+        with self.assertRaises(KeyboardInterrupt): self.run_session(fail='limit-then-interrupt')
+        self.assertEqual(self.events.count('continue'), 2)
+        self.assertEqual(self.events[-3:], ['null-delete', 'metadata-remove', 'detach'])
+
+    def test_repaired_cleanup_does_not_resume_again_even_if_limit_recorded(self):
+        self.run_session(fail='repaired-with-limit')
+        self.assertEqual(self.events.count('continue'), 1)

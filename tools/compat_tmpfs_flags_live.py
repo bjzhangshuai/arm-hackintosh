@@ -42,6 +42,7 @@ else:
 breakpoints = []
 started = time.monotonic()
 counts = {"create": 0, "existing": 0, "extflags": 0, "observed": 0}
+stop_reason = None
 # Every write is bound to the protected anchor for this particular live boot.
 repair_existing = os.environ.get("MACVM_TMPFS_REPAIR_EXISTING") == "YES"
 storage_active = {}
@@ -132,8 +133,10 @@ class Bridge(gdb.Breakpoint):
         self.kind = kind
 
     def stop(self):
+        global stop_reason
         counts["observed"] += 1
         if counts["observed"] > 100000 or time.monotonic() - started > 7200:
+            stop_reason = "limit"
             gdb.write(f"MACVM_TMPFS_FLAGS_LIMIT {counts!r}\n")
             return True
         try:
@@ -197,6 +200,7 @@ class Bridge(gdb.Breakpoint):
             # Uncached/unreadable names are not evidence for mutation.
             return False
         except Exception as error:
+            stop_reason = "error"
             gdb.write(f"MACVM_TMPFS_FLAGS_ERROR {error!r} {counts!r}\n")
             return True
         return False

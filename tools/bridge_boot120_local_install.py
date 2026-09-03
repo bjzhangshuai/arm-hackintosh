@@ -2,7 +2,8 @@
 
 Use only after the current local archive is ready. This is not an installation
 loop or timer: it attaches to the existing inner VM and stops at one NULL repair,
-an existing metadata observation budget, contract mismatch or external SIGINT.
+contract mismatch or external SIGINT. A normal metadata observation limit retires
+only those metadata breakpoints; the separate one-shot NULL guard stays armed.
 No signature/policy decision or guest instruction byte is changed.
 """
 import os
@@ -30,6 +31,13 @@ try:
     null_bp.silent = True
     gdb.write('MACVM_BOOT120_LOCAL_BRIDGE_ARMED null_repairs_max=1 existing_relabels=0 metadata_observation_max=100000\n')
     gdb.execute('continue')
+    if not cleanup.repaired and metadata.stop_reason == 'limit':
+        # Boot120's original metadata session actually reached 100001
+        # observations. Its independent budget must not disarm the later
+        # preflight cleanup guard. Never resume a contract error or unknown stop.
+        metadata.remove_breakpoints()
+        gdb.write('MACVM_BOOT120_METADATA_BUDGET_RETIRED null_guard_still_armed=1 metadata_writes_enabled=0\n')
+        gdb.execute('continue')
 finally:
     if null_bp is not None and null_bp.is_valid():
         null_bp.delete()
