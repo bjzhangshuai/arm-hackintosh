@@ -2,7 +2,22 @@
 
 ## Current validation status — 2026-09-03, Boot120 local prepare repair
 
-**Latest (14:25 UTC):** Following the source-led B014 diagnosis and a verified
+**Latest (14:35 UTC):** B015 reached actual installation operations: mutable
+product creation and prior-update cleanup succeeded, and local
+`OSISUnarchiveMobileSoftwareUpdateOperation` started at guest 14:32:54. This is
+an active local-archive installation phase, not OS installation completion.
+At Linux 14:34:59 QMP was running, target I/O ok, failed reads/writes zero and
+no native crash. Metadata retired with create=132/extflags=8730 and the verified
+NULL guard remains armed. No additional OS download has been observed.
+
+B015's temporary license-HTML wait resolved naturally;
+the same InstallAssistant main thread returned to its normal event loop and
+the genuine license text appeared. No service was killed and no guest code was
+changed for this wait. The license was confirmed and the existing `macos26`
+target selected; one target Continue click was issued. The bundled startosinstall
+explicitly does not support Apple Silicon Recovery and was not substituted.
+
+Following the source-led B014 diagnosis and a verified
 pre-launch coverage check, B015 launched InstallAssistant 10787 / helper 10793.
 UpdateBrain 10796 actually reached running state at guest 14:24:24, and wakeup
 succeeded at 14:24:31. The installer selected the same local UpdateBundle.zip

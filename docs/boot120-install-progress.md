@@ -737,3 +737,39 @@ and it explicitly selects the local SharedSupport UpdateBundle.zip / 26.6.2 /
 One observed welcome Continue click was issued; do not repeat it while the
 license view is still rendering. The later preparation/NULL-repair gate remains
 open, and these startup facts are not installation completion.
+
+### B015 license wait and same-process continuation
+
+Read-only task stacks first show InstallAssistant 10787 synchronously waiting
+for the HTML-to-attributed-string XPC reply. The agent 10806 terminated its own
+WebKit GPU/WebContent subprocesses; that alone did not establish a permanent
+hang or a requirement to replace the GPU. A subsequent bounded snapshot shows
+the agent's event loop and then the installer's normal NSApplication event loop.
+The genuine license text appeared without another welcome Continue, service
+termination, VM restart, or guest-code alteration. The license was confirmed
+and the original `macos26` target selected; one target Continue was sent at
+Linux 14:34 UTC. Progress callbacks remain the next gate.
+
+The existing ARM64 `Contents/Resources/startosinstall` contains an explicit
+unsupported-in-Apple-Silicon-Recovery diagnostic. It was inspected only, not
+launched as a second installation route. Log-first observation does not require
+replacing the native UI installer or disabling WindowServer.
+
+The read-only task observer now accepts an optional set of 1–8 exact PIDs,
+validates the scope before opening QMP, and keeps its original environment,
+running-state, instruction/UUID and memory bounds. A first snapshot refused
+the debugger's temporary stopped state without resuming it; a later snapshot
+ran normally. Two new tests cover this selector, and 93 focused isolated-Linux
+tests passed in the current run (a selected subset, not the entire repository).
+Private stacks/screenshots remain outside Git; no production tests or timers.
+
+At guest 14:32:39 the same helper accepted the existing target. Mutable product
+creation succeeded at 14:32:51, cleanup succeeded at 14:32:54, and
+`OSISUnarchiveMobileSoftwareUpdateOperation` then started using the previously
+selected local archive. There was no additional installer process or boot.
+At Linux 14:34:59 the exact target's I/O status is ok, failed reads/writes zero,
+QEMU running and no native crash. The compatibility observer retired normally
+at observed=100001 with create=132, existing=0, extflags=8730; the B012/B013
+NULL guard stays armed. The live terminal reader continues; no more screenshots
+are needed during this noninteractive phase. Guest and Linux clocks are not
+identical: retain both timestamps rather than infer timing from filenames.

@@ -29,7 +29,16 @@ def canonical(value):
     return value
 
 
-def main():
+def validate_wanted_pids(wanted_pids):
+    if wanted_pids is not None and (
+            not isinstance(wanted_pids, frozenset) or not 1 <= len(wanted_pids) <= 8
+            or any(type(p) is not int or not 1 <= p <= 999999 for p in wanted_pids)):
+        raise ValueError('optional target set must contain 1-8 exact positive PIDs')
+    return wanted_pids
+
+
+def main(*, wanted_pids=None):
+    validate_wanted_pids(wanted_pids)
     if (os.uname().nodename != 'macvm-validation'
             or os.environ.get('MACVM_DEBUG_ENV_CONFIRMED') != 'YES'
             or Path('/proc/974460/exe').resolve() != Path('/home/macvm/src/macvm/build/qemu-boot119-graphics-storage/qemu-system-aarch64')
@@ -58,7 +67,9 @@ def main():
             if pid > 999999:
                 break  # The allproc list head is not another struct proc.
             name = m.read(proc + 0x5CC, 17).split(b'\0', 1)[0].decode(errors='replace')
-            if name in {'Terminal', 'WindowServer', 'InstallAssistant', 'osinstallersetup', 'com.apple.Mobile'}:
+            selected = (pid in wanted_pids if wanted_pids is not None else name in {
+                'Terminal', 'WindowServer', 'InstallAssistant', 'osinstallersetup', 'com.apple.Mobile'})
+            if selected:
                 task = proc + proc_size
                 vm_map = canonical(m.u64(task + 0x28))
                 pmap = canonical(m.u64(vm_map + 0x58))
