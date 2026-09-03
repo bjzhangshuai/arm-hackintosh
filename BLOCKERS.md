@@ -1,6 +1,6 @@
 # Blockers
 
-## Current validation status — 2026-09-03, Boot120 local installation resumed
+## Current validation status — 2026-09-03, Boot120 local prepare repair
 
 Boot120's internal target passes the actual prerequisite check and reaches the
 installation progress UI. At 10:23 UTC the installer shows a software-update
@@ -10,12 +10,48 @@ ZIP64 and backed up outside the inner APFS target.
 The first local UI launch exposed the previously established B010 tmpfs staging
 problem again; the bounded combined session now passes actual B010 service
 startup and retains the B012 one-shot guard after normal metadata retirement.
-The real 26.6.2/25G83 local product is selected, and screenshot 99 shows actual
-installation progress after a verified QMP click. B012 has not yet hit or been
-repaired. Packaging checks and progress UI do not prove installation success.
+The local 26.6.2/25G83 archive completed extraction and integrity verification
+at guest 13:30:13 UTC, with zero additional OS packages downloaded. Preparation
+then failed at PREFLIGHT_PERSONALIZE (fraction 0.15) at 13:30:34. The new service
+PID 10125 has the same B012 NULL cleanup stack. B013 below explains why the
+old adapter could never match its kernel process name. The adapter is now fixed
+and validated; actual one-shot correction/resumed installation is not yet proven.
 Installation, account creation and installed-system boot remain incomplete. The
 existing 25G72 IPSW was reused for recovery boot, not a complete offline workflow.
 See `docs/boot120-install-progress.md` for current evidence; Boot119 below is history.
+
+### B013 — NULL-cleanup adapter compared a truncated kernel name with 49 bytes
+
+- **State:** Code defect fixed; live correction and continuation pending.
+- **Evidence:** Private second failure archive
+  `boot120-local-prepare-crash-20260903-1330.tar.gz`, 212,910 bytes, SHA256
+  `6c6fac838c94ab9e212aed1c08b2f51d8e5c9af4ed1ecdf0ffb3e593869aa592`.
+  PID 10125 crashed in `CFRelease.cold.2` via the exact same UpdateBrain
+  `checkAndReissueUCRTAndOICIfNeeded:` cleanup. CF/UpdateBrain UUIDs and the
+  CF load address are unchanged. Do not confuse old PID 9169's normal teardown
+  with new PID 10125's SIGTRAP. The debugger's natural timeout occurred later,
+  so timeout is not the cause of this failure.
+- **Root cause/source:** `bridge_boot120_null_cleanup.py::NullCleanup.stop`
+  read `proc+0x5dd` and compared it with the 49-character executable name.
+  XNU `resource_monitors.h` defines `proc_name_t[2*MAXCOMLEN+1]`, and
+  `kern_exec.c::set_proc_name` copies at most 32 characters. Therefore the
+  intended service was silently rejected before the existing cleanup planner.
+  Existing planner/session tests mocked a full name and missed the adapter bug.
+- **Correction:** Read precisely 17-byte p_comm and 33-byte p_name fields, and
+  require the exact executable LC_UUID at proc+0x608. Truncated names alone are
+  not an identity. The exact RestoreKernelCache's proc_selfname and originator
+  UUID getter establish offsets/bounds; live instruction checks enforce them.
+  All existing caller UUID, full function bytes, NULL local, frame, signed LR,
+  one-repair budget and PC-only authenticated-epilogue restrictions remain.
+- **Validation:** 89 focused tests pass inside isolated Linux, including seven
+  process-identity and eight real-adapter callback regression tests. The fixed
+  adapter passes read-only live verification and detaches normally. No build,
+  test, package or QEMU replacement ran on either production machine.
+- **Next bounded experiment:** One user-authorized retry in the existing inner
+  VM using the verified local archive, with the corrected one-shot adapter.
+  No signatures/tickets/policy decisions are replaced and no retry loop is used.
+  A COMPLETED/1.0 callback followed by an error is failure, not installation
+  completion; require actual NULL repair evidence and later prepare success.
 
 ### Installer GUI acceptance
 

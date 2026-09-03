@@ -18,6 +18,7 @@ from arm64_user_memory import UserMemory16K
 from updatebrain_null_cleanup import (
     CF_BASE, CF_NULL, CF_UUID, CF_WORDS, CALLER_RETURN, MASK47, PROCESS,
     UB_UUID, UB_WORDS, plan_cleanup, verify_uuid, verify_words,
+    PROCESS_LAYOUT_WORDS, is_updatebrain_proc,
 )
 
 RUN = Path('/home/macvm/runs/aux-26.6/xnu-imgsrc-reims-boot120-internal-install')
@@ -124,13 +125,12 @@ class NullCleanup(gdb.Breakpoint):
                 return False
             thread = canonical(reg('TPIDR_EL1'))
             proc = canonical(u64(canonical(u64(thread + 0x3E8)) + 0x18))
-            name = kernel(proc + 0x5DD, 64).split(b'\0', 1)[0].decode('ascii')
-            if name != PROCESS:
+            if not is_updatebrain_proc(kernel, proc):
                 return False
             pid = struct.unpack('<I', kernel(proc + 0x60, 4))[0]
             mem = memory(proc)
             registers = {n: reg(n) for n in ('pc', 'x0', 'sp', 'x29', 'x30')}
-            destination = plan_cleanup(mem.read, process=name,
+            destination = plan_cleanup(mem.read, process=PROCESS,
                                        pc=registers['pc'], x0=registers['x0'],
                                        sp=registers['sp'], fp=registers['x29'],
                                        lr=registers['x30'])
@@ -161,6 +161,7 @@ def attach_and_verify():
                     'set print thread-events off', 'set remotetimeout 30'):
         gdb.execute(command)
     gdb.execute('target remote 127.0.0.1:12355')
+    verify_words(kernel, SLIDE, PROCESS_LAYOUT_WORDS)
     for address, word in ((0xFFFFFE0009CF0B38, 0xD538D080),
                           (0xFFFFFE0009CF0B3C, 0xF941F401),
                           (0xFFFFFE000A35A220, 0xF9400C00)):
@@ -169,7 +170,7 @@ def attach_and_verify():
     mem = memory(find_terminal())
     verify_uuid(mem.read, CF_BASE, CF_UUID)
     verify_words(mem.read, CF_BASE, CF_WORDS)
-    gdb.write(f'MACVM_B012_LIVE_CF_CONTRACT_VERIFIED mode={MODE}\n')
+    gdb.write(f'MACVM_B012_LIVE_CF_CONTRACT_VERIFIED mode={MODE} proc_name_bytes=33 executable_uuid_required=1\n')
 
 
 def run():

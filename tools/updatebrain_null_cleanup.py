@@ -8,6 +8,18 @@ ticket, ownership and authorization decisions remain unmodified.
 import struct
 
 PROCESS = 'com.apple.MobileSoftwareUpdate.UpdateBrainService'
+EXECUTABLE_UUID = bytes.fromhex('ab89a9684a2b3b7a845b78dbb8af3b32')
+# set_proc_name uses sizeof(field)-1: p_comm[17], p_name[33]. Neither
+# stores this 49-byte executable name. Name prefixes are only a prefilter;
+# the kernel's LC_UUID and the caller image/code/frame checks are mandatory.
+PROC_COMM_OFFSET, PROC_NAME_OFFSET, PROC_UUID_OFFSET = 0x5CC, 0x5DD, 0x608
+PROCESS_LAYOUT_WORDS = {
+    0xFFFFFE000A1DF89C: 0x91173001,  # proc_name: p_comm +0x5cc
+    0xFFFFFE000A1DFB3C: 0x52800429,  # proc_selfname: bound 33
+    0xFFFFFE000A1DFB48: 0x91177501,  # proc_selfname: p_name +0x5dd
+    0xFFFFFE000A28A9FC: 0x91182008,  # originator UUID: p_uuid +0x608
+    0xFFFFFE000A28AA00: 0x3DC00100,  # load the complete 16-byte UUID
+}
 CF_BASE = 0x187C4F000
 CF_UUID = bytes.fromhex('fdba2243a7ab35249b94f3034ac36e41')
 UB_UUID = bytes.fromhex('8bb113cf7583355482b4b4c009a16a16')
@@ -32,6 +44,19 @@ UB_WORDS = {
     0x51504: 0xA94257F6, 0x51508: 0x910143FF,
     0x5150C: 0xD65F0FFF,
 }
+
+
+def is_updatebrain_proc(read, proc):
+    """Bounded kernel identity check; never identify by a truncated name alone."""
+    if (type(proc) is not int or proc & 7
+            or not 0xFFFFFE0000000000 <= proc < 0xFFFFFF0000000000 - 0x618):
+        raise ValueError('invalid proc identity address')
+    name = PROCESS.encode('ascii')
+    if read(proc + PROC_COMM_OFFSET, 17) != name[:16] + b'\0':
+        return False
+    if read(proc + PROC_NAME_OFFSET, 33) != name[:32] + b'\0':
+        return False
+    return read(proc + PROC_UUID_OFFSET, 16) == EXECUTABLE_UUID
 
 
 def verify_uuid(read, base, expected):

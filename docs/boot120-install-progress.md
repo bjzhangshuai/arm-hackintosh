@@ -612,3 +612,46 @@ That MSU cancellation is the normal operation sequence, not an agent stopping
 this installation. No new system-package download is present in that sequence.
 Guest free space is 94,561,860 KiB at the report. B012 remains armed and unhit;
 do not claim that the NULL correction, full preflight or installation has passed.
+
+## 13:30 UTC failure and source-level adapter correction
+
+The local archive finished extracting at 12:51:26. Direct task reads at 13:19
+identified `OSISSignedBOM` hashing payload.016 then payload.017, not downloading.
+At 13:30:13 the installer recorded success for the complete unarchive/integrity
+operation. The subsequent download operation retrieved 0 packages / 0.000 GB.
+
+MSU preparation reached PREFLIGHT_PERSONALIZE at fraction 0.15 at 13:30:33, then
+failed at 13:30:34 (SUMacController 7723 / MSU 7 / XPC connection interrupted).
+The private crash report identifies new UpdateBrain PID 10125 and the same
+`CFRelease(NULL)` cleanup as B012. Its preceding COMPLETED/1.0 callback means
+the failed operation ended; it is not evidence of a successfully installed OS.
+
+The fixed adapter previously compared XNU's at-most-32-character p_name against
+the full 49-character executable name. It now checks the bounded name fields
+plus exact executable UUID, retaining all original caller/code/frame checks.
+The real kernel getter instructions independently confirm all offsets and were
+verified live before enabling any correction. See B013 in BLOCKERS.md.
+Eighty-nine focused tests pass in isolated Linux; Python compilation succeeds.
+The updated adapter's read-only live verification passed and detached cleanly.
+Actual correction/continued installation remains the next acceptance gate.
+
+## Log-first continuation (user request)
+
+`guest-retry-boot120-local-archive-b013.sh` is an exclusive, one-launch wrapper
+for the same local 25G83 archive. It checks the exact ARM Recovery identity,
+target UUID, archive size/ready/export markers, executable signature and that
+native archive verification is not skipped. Existing launch evidence is retained.
+It does not kill helpers, reboot, change QEMU, or schedule a later action.
+
+For this launch it follows `/var/log/install.log` and the new installer console
+log into the existing serial console. Its owned log reader stops when this UI
+process exits; that exit is explicitly not evidence of installation success.
+WindowServer and the display backend remain running. After entering progress,
+use logs instead of recurrent screen captures; inspect UI only for interaction
+or final verification. Log fractions are stage-local, not overall completion.
+Unknown percentages remain unknown, and COMPLETED with an error means failure.
+
+The combined isolated-Linux check now passes **94 tests**, including five new
+static launcher safety contracts; `bash -n` also passes. Those static contracts
+are not a substitute for the pending actual installation acceptance. No tests
+ran on the production Mac or physical Linux host. No automation was created.

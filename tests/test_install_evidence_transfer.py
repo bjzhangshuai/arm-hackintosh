@@ -32,6 +32,14 @@ class InstallEvidenceTransferTests(unittest.TestCase):
             self.assertTrue(endpoint.startswith('/'))
             self.assertEqual(endpoint.count('/'), 1)
 
+    def test_local_prepare_crash_never_overwrites_first_failure(self):
+        self.assertEqual(resolve_transfer('boot120-local-prepare-crash'), (
+            Path('/home/macvm/installation-data/install-analysis/boot120-local-prepare-crash-20260903-1330.tar.gz'),
+            '/boot120-local-prepare-crash.tar.gz',
+        ))
+        self.assertNotEqual(resolve_transfer('boot120-local-prepare-crash')[0],
+                            resolve_transfer('boot120-personalization-logs')[0])
+
     def test_rejects_non_enum_inputs(self):
         for kind in ('', 'unknown', '../shutdown-logs', '/tmp/logs',
                      'boot120-personalization-logs/../x', 'http://example.com/logs'):
