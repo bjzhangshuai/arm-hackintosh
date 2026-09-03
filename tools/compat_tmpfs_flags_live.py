@@ -238,14 +238,12 @@ class StorageObserve(gdb.Breakpoint):
         return False
 
 
-try:
-    gdb.execute("set pagination off")
-    gdb.execute("set confirm off")
-    gdb.execute("set architecture aarch64")
-    gdb.execute("set print thread-events off")
-    gdb.execute("set remotetimeout 30")
-    gdb.execute("target remote 127.0.0.1:12355")
+def install_breakpoints():
     verify_instructions(u32, SLIDE)
+    # Revalidate the same-boot anchor itself, before installing any mutator.
+    anchor = lineage(EXPECTED_ANCHOR_VNODE)
+    if anchor is None or anchor[0] != () or u32(anchor[3] + 0x14) != 2:
+        raise ValueError('live protected tmpfs anchor no longer matches')
     breakpoints.append(Bridge(CREATE_SUCCESS, "create"))
     breakpoints.append(Bridge(GETATTR_LOCKED, "existing"))
     if os.environ.get("MACVM_TMPFS_TRACE_STORAGE") == "YES":
@@ -258,11 +256,30 @@ try:
                 raise ValueError(f"storage observer instruction mismatch at {address:#x}")
             breakpoints.append(StorageObserve(address, kind))
     gdb.write(f"MACVM_TMPFS_FLAGS_ARMED boot={BOOT} signatures=unchanged amfi=unchanged\n")
-    gdb.execute("continue")
-finally:
+
+
+def remove_breakpoints():
     for bp in breakpoints:
         if bp.is_valid():
             bp.delete()
-    if gdb.selected_inferior().pid:
-        gdb.execute("detach")
-    gdb.write(f"MACVM_TMPFS_FLAGS_DETACHED {counts!r}\n")
+
+
+def run():
+    try:
+        gdb.execute("set pagination off")
+        gdb.execute("set confirm off")
+        gdb.execute("set architecture aarch64")
+        gdb.execute("set print thread-events off")
+        gdb.execute("set remotetimeout 30")
+        gdb.execute("target remote 127.0.0.1:12355")
+        install_breakpoints()
+        gdb.execute("continue")
+    finally:
+        remove_breakpoints()
+        if gdb.selected_inferior().pid:
+            gdb.execute("detach")
+        gdb.write(f"MACVM_TMPFS_FLAGS_DETACHED {counts!r}\n")
+
+
+if __name__ == '__main__':
+    run()

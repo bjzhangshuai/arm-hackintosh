@@ -1,11 +1,15 @@
 # Blockers
 
-## Current validation status — 2026-09-03, Boot120 installation in progress
+## Current validation status — 2026-09-03, Boot120 local installation preparation
 
 Boot120's internal target passes the actual prerequisite check and reaches the
-installation progress UI. The 25G83 installer package is downloading; installation,
-account creation and installed-system boot remain incomplete. The existing 25G72
-IPSW was reused for recovery boot, not a complete offline installation workflow.
+installation progress UI. At 10:23 UTC the installer shows a software-update
+personalization failure (B012), traced to UpdateBrain's CFRelease(NULL) cleanup.
+The already downloaded 25G83 payload is preserved and is being repackaged locally.
+The first local UI launch exposed the previously established B010 tmpfs staging
+problem again; the next bounded session is prepared to cover both contracts.
+Installation, account creation and installed-system boot remain incomplete. The
+existing 25G72 IPSW was reused for recovery boot, not a complete offline workflow.
 See `docs/boot120-install-progress.md` for current evidence; Boot119 below is history.
 
 ### Installer GUI acceptance
@@ -214,6 +218,87 @@ See `docs/boot120-install-progress.md` for current evidence; Boot119 below is hi
   B011's missing-container preflight failure is resolved. Screen 38 reaches
   genuine disk selection; actual installation and account creation remain pending.
   Live checkpoint: `docs/boot120-install-progress.md`.
+
+### B012 — UpdateBrain NULL cleanup crashes before personalization
+
+- **State:** Open; root cause established, correction prepared but not yet
+  applied to a matching live call. First observed in the read-only status check
+  at 2026-09-03 10:23 UTC. The later actions below were separately authorized by
+  the user's request to fix and continue using local assets. No automation or
+  VM restart was introduced.
+- **Evidence:** Genuine VNC capture
+  `artifacts/boot120/install-20260903/46-progress-20260903-1024.png` shows
+  "An error occurred preparing the update. Failed to personalize the software
+  update. Please try again." The background estimate changed to about one minute;
+  neither this estimate nor the progress bar means installation succeeded.
+  QMP still reports PID 974460 running, target I/O `ok`, zero failed reads/writes,
+  and no native crash marker. Cumulative target writes are 37,619,216,384 bytes;
+  this is not a download-completion or installed-size metric.
+- **More specific stage evidence:** New serial output near guest 10:14:25–28 UTC
+  includes `SUMacControllerCommandPreparePackage` and `result = success`, with
+  UpdateBrain PID 7514 and the existing target Update-volume mount. Thus the old
+  download-start log is no longer a sufficient description of current progress.
+  These successful preparation events do not identify the subsequent error's
+  underlying code or establish successful personalization.
+- **2026-09-03 follow-up authorized by the user:** The failure dialog was
+  acknowledged once to access Recovery Terminal; no retry or reboot followed.
+  Exported logs establish UpdateBrain PID 7514 crashed at 10:14:29 UTC with
+  EXC_BREAKPOINT/SIGTRAP and `*** CFRelease() called with NULL ***`.
+  The stack is `CFRelease.cold.2` → `CFRelease` →
+  `-[MSUPrebrain checkAndReissueUCRTAndOICIfNeeded:] +496` →
+  `handle_MSUPreflightUpdate +940`. Error propagation is MSU code 7 / XPC
+  connection interrupted → SUMacController 7723 → OSInstallerSetup 1007.
+- **Exact implementation:** ARM64e UpdateBrainLibrary 2422.160.6 / 25G83,
+  UUID `8bb113cf-7583-3554-82b4-b4c009a16a16`, SHA256
+  `0d680541b7c6f2e6911cdf2a83e4144892cf3c0ad10325b041c3b6b7a254475b`.
+  Function file addresses 0x5130c–0x51510 initialize the ticket local to NULL,
+  attempt to read `/System/Volumes/iSCPreboot/SFR/current/apticket.der`, log
+  the intended skip on read failure, then unconditionally call CFRelease
+  at 0x514f8 on that still-NULL local. The live SFR directory is absent.
+  This establishes the cleanup defect, not a signing-server rejection or a
+  QEMU native crash. Later package signature/content/personalization checks are
+  separate calls and remain unchanged; no ticket is fabricated.
+- **Bounded correction prepared, not yet applied:**
+  `tools/updatebrain_null_cleanup.py` and its Boot120 adapter permit one PC-only
+  jump from the exact CFRelease NULL failure block to its own real epilogue.
+  Exact process, image UUIDs, full caller bytes, NULL local, saved stack/LR and
+  instruction contracts must match. The original RETAB still authenticates the
+  unchanged return address. No disk/text/signature-policy write is permitted.
+  Nineteen planner tests pass in isolated Linux. The live read-only `verify`
+  mode passed at 10:45 UTC and detached. Repair-only mode was subsequently armed
+  during one local UI launch, but no matching call occurred. It was explicitly
+  detached by SIGINT with `repaired=False` after the earlier B010 startup failure;
+  the original VM remained running with I/O `ok`.
+- **Offline prerequisite:** The completed 25G83 UpdateBundle was preserved
+  before any retry: 2,233 regular files / 19,202,615,016 bytes, matching file
+  paths/sizes and key-metadata checks, with `CLONE_COMPLETE`. This is an APFS
+  clone on the same target volume, not an independent-disk backup. A separate
+  local working product was assembled. Full control-flow review disproved the
+  initial static-directory assumption for Recovery: getenv at 0x7560 branches
+  before the static preference at 0x7660, using Recovery's own mutable-product
+  paths instead. The normal local UpdateBundle ZIP route is now being prepared.
+  The original downloaded PKG was removed by Apple's
+  successful payload-disposal operation, not by this repair.
+- **First local UI launch:** Unchanged secondary InstallAssistant PID 8206 and
+  helper 8213 launched, found the local asset metadata/UpdateBrain ZIP, and
+  extracted the latter successfully. Two automatic UpdateBrain service starts
+  failed with `setup_role_account` EFTYPE 79, matching B010's missing tmpfs
+  attribute/staging failure, before B012. The helper then exited normally; no
+  target selection or fresh OS payload download occurred. Do not label the
+  failed startup a completed local installation path.
+- **Next bounded experiment:** Finish and CRC-check a local ZIP of the retained
+  unchanged payload, restore the unused static-path preference, then use one
+  debugger session for the existing B010 metadata contract plus one B012 cleanup
+  correction. `tools/bridge_boot120_local_install.py` preserves both scopes and
+  budgets; no old/unknown bundle relabelling is enabled. The focused suite has
+  **67 passing isolated-Linux tests**, including detach-on-SIGINT/error tests.
+  Actual local preflight/installation still requires live acceptance. No
+  automatic follow-up, reboot loop or security-decision alteration is authorized.
+- **Private evidence:** `boot120-personalization-20260903-logs.tar.gz`,
+  332,738 bytes, SHA256
+  `e819412dbac150b98a28744f89c934384096a7527347b8a205df06cd315c5cd6`,
+  under the isolated VM's installation-data/install-analysis directory.
+  Apple assets, crash dumps and detailed private logs are not committed.
 
 ### Graphics storage follow-up
 

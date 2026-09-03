@@ -2,8 +2,10 @@
 
 ## Current state
 
-Boot120 is downloading its installation package. It has **not** completed the
-installation or produced a verified bootable system. This document does not
+Boot120 finished downloading and expanding its 25G83 package, then UpdateBrain
+crashed in a NULL cleanup call (B012). A local payload clone is preserved and a
+bounded correction/local installation route is being prepared. It has **not**
+completed installation or produced a verified bootable system. This document does not
 authorize interrupting it. The approved Boot119 shutdown/restart is already done.
 Keep outer Linux and its NBD attachment running. Only inner test resources below
 are in scope; production guests, QEMU packages and passthrough remain untouched.

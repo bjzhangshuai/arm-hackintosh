@@ -250,9 +250,150 @@ been disclosed before the second large download started.
 
 ### Follow-up during the long download
 
-The current-task heartbeat `arm-macos` (ARM macOS 安装跟进) is active every five
-minutes. It follows the existing run, preserves production/isolation boundaries,
+The current-task heartbeat `arm-macos` (ARM macOS 安装跟进) was scheduled every five
+minutes and was **paused at the user's request on 2026-09-03**. Wait for an explicit
+user notification before resuming follow-up. Only scheduled follow-up was paused;
+the existing VM and installer were not stopped. The last read-only probe action
+was returned to `idle`; no new probe, reboot or installer action was requested.
+When authorized to resume, it follows the existing run, preserves production/isolation boundaries,
 and does not cancel downloads, repeat UI input, or restart guests on a timer.
 Its completion criterion is installed-system login/desktop and ARM64 identity,
 not a finished package download. Local scheduled follow-up requires the desktop
 application to remain running; the remote VM itself is a separate running process.
+
+### Manual status check: installer failure, 2026-09-03 10:23 UTC
+
+The user has explicitly prohibited automatic follow-up. This was a one-time
+read-only status inspection, not a resumption of the paused heartbeat.
+
+The genuine screen `46-progress-20260903-1024.png` now shows: "An error occurred
+preparing the update. Failed to personalize the software update. Please try
+again." The installer is not complete and no account exists. The error dialog
+was not dismissed and no retry, reboot, debugger or runtime change was made.
+QMP confirms the original inner QEMU is running, with target I/O `ok`, no failed
+reads/writes and no native crash marker. The earlier 52-minute estimate was not
+a reliable completion estimate.
+
+New serial output around guest 10:14:25–28 UTC records
+`SUMacControllerCommandPreparePackage`, `result = success` and UpdateBrain PID
+7514. This establishes later package preparation activity, not the root cause of
+the subsequent personalization error. B012 in `BLOCKERS.md` records the evidence,
+uncertainty and next bounded diagnostic. Fresh installation/restore error logs
+and the matching error-propagation path are still required; do not infer a
+specific network, signing-service or QEMU fault from the UI wording alone.
+
+### User-authorized diagnosis and local retry preparation, 10:26–10:55 UTC
+
+The original error was acknowledged once for normal Terminal access. The VM
+was not restarted. Exported install/restore logs and the actual crash report
+identify an UpdateBrain NULL cleanup defect (B012), not an established network
+or signing-service refusal. At 10:14:29 PID 7514 hit `CFRelease(NULL)` in
+`-[MSUPrebrain checkAndReissueUCRTAndOICIfNeeded:]`. Reading the missing iSC
+SFR ticket returned error 4; the intended skip path nevertheless released its
+NULL local at UpdateBrainLibrary file address 0x514f8. Exact image identities,
+error propagation and private archive hash are recorded in `BLOCKERS.md`.
+
+The matching 25G83 package had already downloaded successfully. The installer
+mounted SharedSupport at 09:33:12 and finished expanding UpdateBundle at
+10:14:03, then its normal payload-disposal operation removed the original PKG
+and unmounted SharedSupport. A later download operation requested zero packages.
+The expanded payload still existed; it was not necessary to fetch 18.4 GB again.
+
+Before any retry, `/Volumes/macos26/macvm-offline-25G83-boot120` was created
+as an APFS clone of the expanded payload: **2,233 regular files,
+19,202,615,016 bytes**. Source and clone path/size listings match, with matching
+key metadata checks and a `CLONE_COMPLETE` marker. The clone retains BuildManifest,
+Apple signatures/BOM, ARM64e BaseSystem/Cryptex and VMA2MACOSAP support metadata.
+It shares the same target volume and is **not** an independent-disk backup.
+The metadata states macOS 26.6.2 / 25G83; the old 25G72 IPSW remains a different
+recovery/restore product.
+
+The pure NULL-cleanup planner has 19 passing isolated-Linux tests. Its one-shot
+adapter checks the exact live task, stack, saved signed return address, image
+UUIDs and full caller instructions before permitting only PC to CFRelease's
+own authenticated epilogue. No Apple text, tickets or signature decisions are
+rewritten. A read-only live check passed at 10:45 UTC and detached; no actual
+cleanup repair has been applied yet. Seven local-routing metadata tests and
+five evidence-receiver tests bring this turn's focused gate to **31 passed**.
+No tests or builds ran on the production Mac or physical Linux host.
+
+The initial source review suggested a static-directory local product route:
+`OSISMobileSoftwareUpdateProduct._setDefaultDestinationPaths` selects
+`UpdateBundle-Static` / `UpdateBrain-Static` with `IASkipUnarchivingMSU`.
+The unarchive operation still checks that directories exist and builds a normal
+MSU product; normal package/content/signature/personalization checks remain.
+The helper derives SharedSupport from its own installer app bundle, so a new
+local copy is being assembled with a separate working clone, the previously
+downloaded UpdateBrain archive and routing metadata copied from the real asset.
+Only the isolated Linux server is used to transfer these small local inputs.
+Preparation must pass normal code-signature verification before activation;
+it does not itself launch another installation. **The Recovery branch invalidates
+this initial route assumption; see the complete-control-flow correction below.**
+No force-success defaults,
+remote OS package download, account creation or installed-system success is claimed.
+
+### Local product prepared; first local UI launch issued
+
+Preparation initially stopped at the relocated app bundle's `codesign --verify
+--deep`: `resource envelope is obsolete (custom omit rules)`. Read-only comparison
+established the original bundle passes; both bundles contain identical custom
+omit rules and identical executable/Info/CodeResources bytes. The relocated
+secondary `InstallAssistant` executable verifies normally. No signature was
+removed/replaced and no validator option/security preference was weakened.
+
+The finalizer then verified the original bundle, compared **all 694 regular
+files / 37,676,296 bytes**, modes and symlink targets, allowing only the explicit
+new SharedSupport symlink. The actual InstallAssistant executable, helper and
+UpdateBrain XPC passed normal signature verification. Six comparator regression
+tests pass in isolated Linux (focused total **37**). The helper's exact `init`
+code calls `addSuiteNamed:` for `com.apple.InstallAssistant`; that common suite's
+prior IASkipUnarchivingMSU state was saved before selecting static directories.
+`PREPARED_LOCAL_ONLY` was written; the source payload clone remains untouched.
+
+One launch of the unchanged, normally verified secondary InstallAssistant was
+issued, PID 8206. No target/Continue action has yet been issued in this local
+attempt. The B012 adapter is armed for at most one exact cleanup correction with
+a 20-minute SIGINT deadline and detach cleanup. It has not yet reported a repair.
+Actual local product selection, absence of a new remote OS payload request and
+preflight advancement still require live evidence. Network personalization may
+still require small Apple service exchanges; local payload reuse is not a claim
+of a completely air-gapped installation.
+
+### Local UI startup result and complete Recovery path correction
+
+The first local UI launch did not reach a target-selection/installation action.
+Helper PID 8213 found our local asset XML and UpdateBrain.zip, extracted the
+brain successfully, then failed to start it: `setup_role_account` EFTYPE 79,
+MSU 27 / SUMacController 7721. This recurs before B012 and matches the established
+B010 staging failure after the temporary metadata compatibility bridge expired.
+The retained staging anchor, exec and tmp directories still have `restricted`;
+the missing requested tmpfs extended-attribute response still matters. The
+helper exited normally, and a later process inventory found no InstallAssistant,
+UpdateBrain or helper. No agent killed/restarted the installer or VM.
+
+The initial static-directory source reading was incomplete. Full function
+0x7464–0x784c shows `getenv(__OSINSTALL_ENVIRONMENT)` at 0x7560 takes the Recovery
+branch *before* the IASkipUnarchivingMSU query at 0x7660; Recovery sets its brain
+path under /tmp and its destination under the mutable product. The static branch
+also derives paths from safeTemporaryDirectory, not SharedSupport. Therefore
+the initially staged `*-Static` directories are not a verified Recovery route.
+Do not clear the Recovery environment marker or force a successful unarchive.
+
+Instead, `guest-pack-boot120-local-payload.sh` is repackaging the master clone
+into a normal local UpdateBundle.zip, using Apple's existing ditto ZIP64 writer
+with compression level zero and preserved resource metadata. The result is
+**not** claimed to be Apple's original ZIP bitstream; embedded payload, manifest
+and signature files are unchanged and later normal Apple validation must pass.
+It writes a new `.partial`, performs a full unzip CRC test, then promotes the
+archive and restores only the unused preference set by this task. No CDN is
+used to build it, and the master clone is not overwritten.
+
+The unused standalone B012 debugger was interrupted by exact PID/command/opt-in
+checks, removed its breakpoint and detached with `repaired=False`; QMP remained
+running, target I/O ok, zero failed reads/writes. One combined session is now
+prepared to cover the unchanged B010 create/getattr contracts and one B012 NULL
+cleanup. The bridge verifies the live protected anchor again before installing
+mutators and disables existing-bundle relabelling. It has one continue, existing
+observation limits and cleanup on error/SIGINT. **67 focused tests pass** in the
+isolated Linux VM. This is prepared code, not proof of a successful repair or
+installation. No recurring automation was created or resumed.

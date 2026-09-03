@@ -1,5 +1,5 @@
 {
-  "status": "Boot120 running; internal target accepted; installer downloading 25G83 package; OS not installed",
+  "status": "Boot120 running; B012 NULL cleanup correction not yet applied; first local UI launch hit B010 tmpfs staging failure before preflight; preserved 25G83 payload being repackaged locally; combined correction prepared; OS not installed",
   "run_directory": "/home/macvm/runs/aux-26.6/xnu-imgsrc-reims-boot120-internal-install",
   "qemu_pid_at_launch": 974460,
   "qemu_executable": "/home/macvm/src/macvm/build/qemu-boot119-graphics-storage/qemu-system-aarch64",

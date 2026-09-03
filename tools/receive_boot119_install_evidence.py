@@ -14,15 +14,33 @@ import time
 
 DESTINATION = Path('/home/macvm/installation-data/install-analysis/updatebrain-25G83.zip')
 MAX_BYTES = 64 * 1024 * 1024
+TRANSFER_KINDS = {
+    'updatebrain': ('updatebrain-25G83.zip', '/updatebrain.zip'),
+    'shutdown-logs': ('boot119-before-internal-logs.tar.gz', '/shutdown-logs.tar.gz'),
+    'boot120-personalization-logs': (
+        'boot120-personalization-20260903-logs.tar.gz',
+        '/boot120-personalization-logs.tar.gz',
+    ),
+    'boot120-local-product-info': (
+        'boot120-local-product-25G83-Info.plist',
+        '/boot120-local-product-info.plist',
+    ),
+}
+
+
+def resolve_transfer(kind):
+    """Select only a fixed private destination; never accept caller-supplied paths."""
+    if kind not in TRANSFER_KINDS:
+        raise ValueError('unknown evidence kind')
+    name, endpoint = TRANSFER_KINDS[kind]
+    return DESTINATION.parent / name, endpoint
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--kind', choices=('updatebrain', 'shutdown-logs'), default='updatebrain')
+    parser.add_argument('--kind', choices=tuple(TRANSFER_KINDS), default='updatebrain')
     args = parser.parse_args()
-    destination = (DESTINATION if args.kind == 'updatebrain' else
-                   DESTINATION.parent / 'boot119-before-internal-logs.tar.gz')
-    endpoint = '/updatebrain.zip' if args.kind == 'updatebrain' else '/shutdown-logs.tar.gz'
+    destination, endpoint = resolve_transfer(args.kind)
     if (platform.system() != 'Linux' or platform.machine() != 'x86_64'
             or platform.node() != 'macvm-validation'
             or os.environ.get('MACVM_DEBUG_ENV_CONFIRMED') != 'YES'):
