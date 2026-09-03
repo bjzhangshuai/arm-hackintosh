@@ -673,3 +673,25 @@ other failures never trigger another send. It cannot resume/reset the VM, and
 typing does not implicitly execute a command. Eight isolated-Linux unit tests
 cover this contract. All input attempts before actual launch are setup input,
 not additional installer retries. The one-launch marker remains authoritative.
+
+### Actual log-first launch and observed result
+
+The acknowledged input path fetched the launcher correctly and started exactly
+one InstallAssistant (10515), with owned log follower 10514. Serial received
+`MACVM_BOOT120_B013_LOG_STREAM_BEGIN` and actual installer log lines at guest
+14:02:20 UTC. The same local SharedSupport UpdateBrain.zip was extracted at
+14:02:48–14:02:50. However, its service failed at role-account setup (EFTYPE 79),
+then helper 10521 reported MSU 27 / SUMacController 7721 at 14:03:08. No new
+installation-progress phase is confirmed, and no further retry was issued.
+
+The combined bridge remains attached with the one-shot NULL guard unhit; its
+metadata observation budget retired with create=0, existing=0, extflags=0.
+This coverage issue is B014, not a demonstrated failure of the corrected NULL
+identity match. Preserve the failed attempt and inspect staging coverage before
+another launch. QMP at Linux 14:04:55 is running, target I/O ok, failed reads
+and writes zero, no native crash. The VM was not stopped or rebooted.
+
+The current focused isolated-Linux suite has **102 passing tests** (94 previous
+checks plus eight acknowledged-input tests). The stream is an ordinary reader
+attached to this installation, not a recurring task; no automated restart,
+screenshot loop, launchd job, cron job or heartbeat was installed.

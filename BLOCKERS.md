@@ -2,6 +2,15 @@
 
 ## Current validation status — 2026-09-03, Boot120 local prepare repair
 
+**Latest (14:04 UTC):** The B013 local retry launched InstallAssistant PID
+10515 with a live install.log/console follower, but its UpdateBrain startup
+failed at role-account setup (EFTYPE 79, then SUMacController 7721 / MSU 27).
+It has not entered another installation-progress phase. No further installer
+retry or VM restart followed. The metadata bridge recorded zero scoped changes
+before normal global-budget retirement; its coverage must be re-established
+from live staging identity and callback evidence before another launch.
+The separate B012 NULL guard remains armed and unhit. See B014 below.
+
 Boot120's internal target passes the actual prerequisite check and reaches the
 installation progress UI. At 10:23 UTC the installer shows a software-update
 personalization failure (B012), traced to UpdateBrain's CFRelease(NULL) cleanup.
@@ -19,6 +28,34 @@ and validated; actual one-shot correction/resumed installation is not yet proven
 Installation, account creation and installed-system boot remain incomplete. The
 existing 25G72 IPSW was reused for recovery boot, not a complete offline workflow.
 See `docs/boot120-install-progress.md` for current evidence; Boot119 below is history.
+
+### B014 — Log-first retry exposes missing staging compatibility coverage
+
+- **State:** Actual service startup failed; no second retry has been launched.
+- **Evidence:** Guest install.log at 14:03:07 reports xpcproxy PID 10529
+  `setup_role_account failed, error 0x4f`; at 14:03:08 helper 10521 reports
+  SUMacController 7721 / MSU_ERR_FAILED_BRAIN_LOAD(27). This is earlier than
+  personalization and is not evidence that B013's NULL repair failed or ran.
+  Private serial snapshot: `b014-log-first-startup-failure.serial.log` in the
+  existing Boot120 run. Raw logs remain private and are not pushed to GitHub.
+- **Code/coverage issue:** `compat_tmpfs_flags_live.py::Bridge.stop` counts all
+  tmpfs observations before subtree eligibility, then retires at 100001.
+  This session reports create=0, existing=0, extflags=0 at that retirement.
+  `bridge_boot120_local_install.py` preserves only the NULL guard afterward.
+  Startup passed the old anchor check when the bridge attached, but that is
+  not proof that the subsequent role-account paths received compatibility
+  responses. Retirement log mtime is Linux 14:03:25 UTC; do not infer exact
+  guest/host event ordering without correlating their clocks.
+- **Next bounded diagnostic:** Compare current staging vnode/node/protection
+  with the captured identity and inspect actual role-account lookup callbacks.
+  Distinguish stale identity, unsupported-query filtering and budget timing
+  before changing code. Do not widen security scope, relabel unknown bundles,
+  reset the global budget blindly or restart the installer in a loop.
+- **Log-first feature:** Live `/var/log/install.log` and installer stdout now
+  reach serial/terminal without periodic screenshots. The outer text filter
+  uses `grep -a` because serial output can contain NUL bytes; raw evidence is
+  preserved. Graphics services, production resources and VM configuration are
+  unchanged. No automation or scheduled polling controller was created.
 
 ### B013 — NULL-cleanup adapter compared a truncated kernel name with 49 bytes
 
