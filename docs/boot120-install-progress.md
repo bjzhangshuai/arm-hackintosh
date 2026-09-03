@@ -695,3 +695,35 @@ The current focused isolated-Linux suite has **102 passing tests** (94 previous
 checks plus eight acknowledged-input tests). The stream is an ordinary reader
 attached to this installation, not a recurring task; no automated restart,
 screenshot loop, launchd job, cron job or heartbeat was installed.
+
+## B014 source-led continuation and B015 coverage gate
+
+At Linux 14:15 UTC, a 2048-byte read-only QMP/HMP inspection revalidated the
+original protected anchor: vnode `0xfffffe2ea19c4430`, node
+`0xfffffe2309b66860`, directory kind 2, flags 0x80000 and the same four-component
+path. Thus the retained anchor itself is not stale. The failed installer dialog
+was acknowledged; helper 10521 then exited normally. The VM was not rebooted.
+The prior B013 debugger was explicitly detached (only its GDB PID was signalled),
+and QMP afterward remained running with target I/O ok and no native crash.
+
+A bounded, read-only observer then captured the current getter requests during
+one `ls/stat` snapshot. It detached after 976 observations / 38 scoped calls,
+without writes. The anchor, exec, tmp and both retained executable bundles are
+still restricted. Actual requests include 0x200020000603 and 0x200000000400,
+with supported=0 at the verified pre-getattr instruction: the missing bit-45
+response is still required. Evidence: `b014-readonly-staging-queries.log`.
+
+The combined session now refuses continued waiting when its global metadata
+budget expires without any scoped response. Existing security/path/code gates
+and the 100000 budget are unchanged. A B015 launcher separates a non-launching
+preflight from an exclusive one-shot launch, using a new marker/console log and
+the same local archive. The focused suite passes **112 isolated-Linux tests**,
+including the actual metadata callback with the observed request masks and the
+zero-coverage lifetime regression. Production machines ran no tests.
+
+Before launching B015, the guest preflight at 14:22:48 passed target identity,
+archive/preservation markers, executable/helper signatures and native-unarchive
+settings. The active bridge actually emitted nine scoped extflags responses
+for anchor/exec/tmp. Only after inspecting this evidence was the B015 launch
+command delivered. This is proof of pre-launch bridge coverage, not yet of
+UpdateBrain startup, NULL cleanup repair or installation completion.

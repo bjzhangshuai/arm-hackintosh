@@ -42,6 +42,19 @@ class LogFirstRetryTests(unittest.TestCase):
         self.assertIn('COMPLETED alone is not success', self.source)
         self.assertIn('not proof of OS installation success', self.source)
 
+    def test_b015_preflight_exits_before_creating_retry_marker(self):
+        source = (Path(__file__).resolve().parents[1] / 'tools' /
+                  'guest-retry-boot120-local-archive-b015.sh').read_text()
+        self.assertIn('case ${1-} in preflight|launch)', source)
+        branch = source[source.index('if [[ $mode == preflight ]]'):source.index('marker=')]
+        self.assertIn('VERIFY_BRIDGE_LOG_BEFORE_LAUNCH', branch)
+        self.assertIn('exit 0', branch)
+        self.assertNotIn('InstallAssistant"', branch)
+        self.assertIn('LOCAL_RETRY_B015_REQUESTED', source)
+        self.assertIn('set -o noclobber', source)
+        for forbidden in ('defaults write', 'killall', 'pkill', 'curl ', 'while '):
+            self.assertNotIn(forbidden, source)
+
 
 if __name__ == '__main__':
     unittest.main()

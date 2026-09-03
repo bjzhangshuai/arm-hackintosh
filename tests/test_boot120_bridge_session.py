@@ -42,9 +42,10 @@ class BridgeSessionTests(unittest.TestCase):
             if command == 'continue':
                 if fail == 'interrupt': raise KeyboardInterrupt()
                 if fail == 'continue': raise ValueError('continue refused')
-                if fail in ('metadata-limit', 'limit-then-interrupt'):
+                if fail in ('metadata-limit', 'limit-then-interrupt', 'empty-metadata-limit'):
                     if self.events.count('continue') == 1:
                         metadata.stop_reason = 'limit'
+                        if fail != 'empty-metadata-limit': metadata.counts['extflags'] = 1
                         return
                     if fail == 'limit-then-interrupt': raise KeyboardInterrupt()
                 if fail in ('metadata-error-stop', 'other-stop'):
@@ -119,6 +120,11 @@ class BridgeSessionTests(unittest.TestCase):
 
     def test_metadata_error_must_not_resume(self):
         self.run_session(fail='metadata-error-stop')
+        self.assertEqual(self.events.count('continue'), 1)
+        self.assertEqual(self.events[-3:], ['null-delete', 'metadata-remove', 'detach'])
+
+    def test_metadata_budget_with_no_scoped_response_must_not_resume(self):
+        self.run_session(fail='empty-metadata-limit')
         self.assertEqual(self.events.count('continue'), 1)
         self.assertEqual(self.events[-3:], ['null-delete', 'metadata-remove', 'detach'])
 

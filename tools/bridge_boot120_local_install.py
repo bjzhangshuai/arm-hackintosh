@@ -36,8 +36,13 @@ try:
         # observations. Its independent budget must not disarm the later
         # preflight cleanup guard. Never resume a contract error or unknown stop.
         metadata.remove_breakpoints()
-        gdb.write('MACVM_BOOT120_METADATA_BUDGET_RETIRED null_guard_still_armed=1 metadata_writes_enabled=0\n')
-        gdb.execute('continue')
+        if not (metadata.counts['create'] or metadata.counts['extflags']):
+            # A verified anchor/installed breakpoint does not establish that
+            # the installer received any required filesystem response.
+            gdb.write('MACVM_BOOT120_METADATA_COVERAGE_MISSING no_scoped_response=1 continuation_refused=1\n')
+        else:
+            gdb.write('MACVM_BOOT120_METADATA_BUDGET_RETIRED null_guard_still_armed=1 metadata_writes_enabled=0\n')
+            gdb.execute('continue')
 finally:
     if null_bp is not None and null_bp.is_valid():
         null_bp.delete()
