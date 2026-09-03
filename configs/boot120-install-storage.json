@@ -1,5 +1,5 @@
 {
-  "status": "Boot120 running; guest internal target verified; installation preflight pending",
+  "status": "Boot120 running; internal target accepted; installer downloading 25G83 package; OS not installed",
   "run_directory": "/home/macvm/runs/aux-26.6/xnu-imgsrc-reims-boot120-internal-install",
   "qemu_pid_at_launch": 974460,
   "qemu_executable": "/home/macvm/src/macvm/build/qemu-boot119-graphics-storage/qemu-system-aarch64",
@@ -24,6 +24,10 @@
     "volume_uuid": "31209BA2-BC1F-4D51-99C1-4AFF986CB8AA",
     "container_uuid": "6C0D6E74-EBBB-4A40-A7F1-AFDE0A1B34FD",
     "gpt_uuid": "3686695A-E650-4E94-BED1-C3302BB3FF7A",
+    "update_volume": "disk5s2",
+    "update_volume_uuid": "189F33BD-FE3A-4D0C-8BDD-9F7E55A61725",
+    "update_mount_at_checkpoint": "/System/Volumes/Data/private/tmp/tmp-mount-S6DjuV",
+    "prerequisite_check_result": "success",
     "may_reformat": false,
     "os_installed": false
   },

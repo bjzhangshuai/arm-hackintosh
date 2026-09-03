@@ -5,9 +5,11 @@
 
 ## 当前真实进度（2026-09-03）
 
+- **当前运行的是 Boot120：内部安装盘预检成功，已进入磁盘安装进度页，正在下载 26.6.2／25G83 安装包。** 尚未完成安装、创建用户或验证安装后启动。[当前记录](docs/boot120-install-progress.md) / [重启衔接计划](docs/boot120-installed-handoff-plan.md)。
+- 先前 26.6／25G72 IPSW（19.77 GB）已复用于恢复启动，但**完整离线安装流程尚未打通**；当前 Recovery 安装器另取 26.6.2 的 InstallAssistant.pkg（18.38 GB）。不能把“IPSW 已下载”写成“后续安装不再下载”。
 - **Boot119 已进入 ARM64 macOS Tahoe 26.6 / 25G72 的真实安装欢迎界面。** 2026-09-03 03:09:33（北京时间）的 QMP 截图包含完整 Tahoe 图案、标题、说明和 Continue 按钮；旧窗口内容残留已不再出现。
 - ARM64 XNU、RecoveryOS、WindowServer、语言选择、恢复工具、真实激活与 KeyRecoveryAssistant 均已运行；安装器为 Mach-O arm64，`InstallAssistant` PID 312、`osinstallersetupd` PID 318。版本、哈希、截图和验收边界见 [Boot119 验收记录](docs/boot119-installer-acceptance.md)。**仅通过“进入安装界面”验收，尚未完成磁盘安装或验证安装后启动。**
-- 图形路径修复包含无用描述符加载、可写纹理被当成采样纹理、访问分析误认字面量和能力编号错误，并通过独立回归及本次真实 UI 验证。Boot119 保持运行；Boot118 已正常退出，旧二进制、磁盘和日志保留。
+- 图形路径修复包含无用描述符加载、可写纹理被当成采样纹理、访问分析误认字面量和能力编号错误，并通过独立回归及真实 UI 验证。Boot119 已按用户批准正常关机并完成备份；Boot120 沿用同一 QEMU 构建，将现有安装盘改接内部 Apple virtio，未重新格式化。
 - 当前 Vulkan 是隔离 VM 内的 Mesa lavapipe 软件实现；未测试 NVIDIA 4060 Ti，不能据此声称硬件 GPU 性能。
 - 495 个 Python 测试（含隔离临时镜像格式化）通过、零跳过；图形新改动使用像素比对及 Vulkan 验证层逐项验收，最新批次见 [BLOCKERS.md](BLOCKERS.md)。
 - 已知未完成：双平面纹理、主渲染目标的完整原生格式读回、部分纹理视图、瞬时栅栏超时后的延迟写回义务保留；Reims 全量 Clippy 仍有既存诊断。未声称完整图形兼容。
@@ -45,10 +47,11 @@ export MACVM_DEBUG_ENV_CONFIRMED=YES
 ./scripts/test.sh
 ```
 
-`scripts/validation-boot118.sh` 保留上一轮运行记录；`validation-boot119.sh` 是当前验证配置，
+`scripts/validation-boot118.sh`、`validation-boot119.sh` 保留历史配置；`validation-boot120.sh` 是当前恢复启动配置，
 包含绝对路径并依赖离线恢复材料，不是全新机器的一键安装器。
 `scripts/build-graphics-storage-validation.sh` 使用独立新构建目录，保留前一构建并校验其二进制哈希，
 仍依赖前一构建的 `config.status`。本次安装界面已单独截图验收，但不代表完整安装或全图形兼容。
 重建前先阅读备份清单和 `BLOCKERS.md`，在新路径准备资源，不覆盖原运行目录。
+这些脚本不是安装后重启入口，不能在已有运行目录上重新执行。
 
 较早的 Phase 1 首页保留在 [docs/initial-phase1-readme.md](docs/initial-phase1-readme.md)，其中历史状态不能代表当前进度。

@@ -1,6 +1,12 @@
 # Blockers
 
-## Current validation status — 2026-09-03, Boot119 installer welcome accepted
+## Current validation status — 2026-09-03, Boot120 installation in progress
+
+Boot120's internal target passes the actual prerequisite check and reaches the
+installation progress UI. The 25G83 installer package is downloading; installation,
+account creation and installed-system boot remain incomplete. The existing 25G72
+IPSW was reused for recovery boot, not a complete offline installation workflow.
+See `docs/boot120-install-progress.md` for current evidence; Boot119 below is history.
 
 ### Installer GUI acceptance
 
@@ -199,8 +205,14 @@
   internally and has reached Recovery's volume examination screen. No outer VM
   restart or production-resource change occurred. Disk backup is not a RAM
   snapshot; the temporary tmpfs bridge must be revalidated in Boot120.
-- B011 is not yet closed: Boot120's guest-visible topology and target preflight
-  still require verification. No completed OS installation or account creation.
+- **Boot120 acceptance:** the unchanged target is internal disk5s1 on disk0s2.
+  UpdateBrain resolves container 6C0D6E74-EBBB-4A40-A7F1-AFDE0A1B34FD and Update
+  volume 189F33BD-FE3A-4D0C-8BDD-9F7E55A61725 (disk5s2). Its restore log then
+  migrates to `/System/Volumes/Data/private/tmp/tmp-mount-S6DjuV/restore.log`.
+  That log records `SUMacControllerCommandPrerequisiteCheck`, `result = success`,
+  and `targetDriveIsInternal = YES` for the exact target UUID and 25G83.
+  B011's missing-container preflight failure is resolved. Screen 38 reaches
+  genuine disk selection; actual installation and account creation remain pending.
   Live checkpoint: `docs/boot120-install-progress.md`.
 
 ### Graphics storage follow-up

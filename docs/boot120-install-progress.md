@@ -185,3 +185,74 @@ At guest 08:03:29, wakeup reaches **100%**, and the current installer selects
 then resolves the bundled license document. This is actual B010 launch/preflight
 progress in Boot120, not merely an xpcproxy spawn. Disk selection and the B011
 target-system-volume preflight still require their own acceptance evidence.
+
+### Internal-target preflight accepted
+
+The license confirmation alert is visible in screen 37. Its explicit Agree
+button was clicked once; screen 38 reaches the real disk-selection page, listing
+`macos26`, 137.23 GB total / 137.1 GB available. It is not yet an installed OS.
+
+The target's Update volume is disk5s2, UUID
+`189F33BD-FE3A-4D0C-8BDD-9F7E55A61725`, in the exact expected normal APFS
+container. UpdateBrain's old restore log records the correct target UUID,
+`Found update container`, `Found update volume`, then moves its output to
+`/System/Volumes/Data/private/tmp/tmp-mount-S6DjuV/restore.log`. Continuing to
+read only the old log would hide subsequent progress. The migrated log records
+`SUMacControllerCommandPrerequisiteCheck`, `result = success`,
+`targetDriveIsInternal = YES`, and target OS 25G83. This closes the original
+B011 missing-container failure, not every later installation requirement.
+
+The read-only target probe verifies both disk identities and the new log.
+Long encoded build-manifest/signature lines are omitted from the display; private
+raw logs remain in the isolated run and are not published to GitHub. No guest
+debugger was attached, VM reset performed, or disk reformatted at this checkpoint.
+The prepared license stack sampler was not executed: visible UI progress and the
+migrated log made another diagnostic sample unnecessary.
+
+### Installation started, not completed
+
+Screen 39 shows `macos26` selected with Continue enabled. After one explicit
+Continue click, screen 40 shows the genuine installation progress page. At guest
+08:22:21, `OSISCreateMutableProductOperation` succeeds, then
+`OSISDownloadOperation` requests the signed InstallAssistant package (18,384,624,402
+bytes) from Apple's CDN. At 08:24:00 the guest's partial file is about 350 MiB;
+this is real target-disk activity, not a completed download or installation.
+The displayed estimate of about four hours is the installer's estimate only.
+The installer holds a PreventUserIdleSystemSleep assertion. QMP remains running
+and reports the installation drive's I/O status as `ok`.
+
+The read-only progress probe is `tools/guest-boot120-install-progress.sh`.
+It does not reopen the installer, control the UI, modify volumes or restart
+anything. The existing reboot-to-shutdown / shutdown-to-pause protection remains
+in effect so an automatic installer reboot cannot blindly reuse Recovery scratch.
+
+### Offline-package gap clarified
+
+The previously downloaded local asset still exists:
+`/home/macvm/macos-restore/26.6/UniversalMac_26.6_25G72_Restore.ipsw`,
+19,772,077,142 bytes. Its firmware and restore/BaseSystem components were reused
+to reach Recovery. The IPSW member listing contains disk-image payloads and
+restore manifests, not an InstallAssistant.pkg / SharedSupport installer product.
+The current Recovery installer selects the different 26.6.2 / 25G83 product.
+Its log explicitly says the download cache does not exist and is skipped, then
+requests the 18,384,624,402-byte InstallAssistant.pkg. This is not a repeat fetch
+of the same IPSW and not evidence that the old download was lost.
+
+The user's requested fully local installation workflow remains **incomplete**.
+Only local recovery boot reuse is established. `_registerDownloadCacheProducts`
+in the matching OSInstallerSetupInternal checks for the cache directory and
+registers recognized package products; it does not treat an arbitrary IPSW as
+the requested PKG. A complete local-IPSW restore workflow or a matching local
+installer-product cache would need its own implementation/verification. Do not
+claim either exists, silently rename the IPSW, replace an open partial file, or
+cancel the active installation merely to change routes. This gap should have
+been disclosed before the second large download started.
+
+### Follow-up during the long download
+
+The current-task heartbeat `arm-macos` (ARM macOS 安装跟进) is active every five
+minutes. It follows the existing run, preserves production/isolation boundaries,
+and does not cancel downloads, repeat UI input, or restart guests on a timer.
+Its completion criterion is installed-system login/desktop and ARM64 identity,
+not a finished package download. Local scheduled follow-up requires the desktop
+application to remain running; the remote VM itself is a separate running process.
