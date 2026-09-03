@@ -593,3 +593,22 @@ QMP is running, target I/O ok, failed reads/writes zero, no native crash.
 Further payload consumption, B012 correction and installation remain unverified.
 Use the working QMP click path with observed screenshots; do not restart the
 installer or claim the earlier unconfirmed VNC clicks started installation.
+
+The corrected read-only task probe completed normally during the progressing
+installation (`tasks-qmp-local-extraction.log`): helper 9166 / thread 52563 was
+inside `archive_write_disk_data_block`. This independently confirms active
+local-package extraction, beyond seeing an enabled UI. At Linux 12:28:56 UTC,
+disk reads/writes continue to increase, failed reads/writes remain zero and QMP
+is running. The UI's roughly 58-minute estimate is not a measured completion ETA.
+The full focused 92-test result and code/evidence notes are backed up in commit
+3558b88; no OS archives, private stacks or crash data were uploaded to GitHub.
+
+The completed guest 12:28:17 UTC status report supplies the installer-side
+confirmation: operation queue started at 12:24:48; mutable-product creation and
+the installer's own cancellation of previous MSU state succeeded; at 12:25:15,
+`OSISUnarchiveMobileSoftwareUpdateOperation` began extracting the **local**
+SharedSupport `UpdateBundle.zip` to `/Volumes/macos26/macOS Install Data/UpdateBundle`.
+That MSU cancellation is the normal operation sequence, not an agent stopping
+this installation. No new system-package download is present in that sequence.
+Guest free space is 94,561,860 KiB at the report. B012 remains armed and unhit;
+do not claim that the NULL correction, full preflight or installation has passed.

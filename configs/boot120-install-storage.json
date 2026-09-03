@@ -18,7 +18,7 @@
     "regular_file_bytes": 19202615016,
     "preservation": "verified APFS clone, same volume; not independent-disk backup",
     "working_guest_path": "/Volumes/macos26/macvm-local-product-25G83",
-    "archive_status": "guest and native Linux CRC passed; ZIP64 directory and 2233-file inventory verified; backup complete; local installer welcome/license UI accepted; full payload consumption pending",
+    "archive_status": "guest and native Linux CRC passed; ZIP64 directory and 2233-file inventory verified; backup complete; local product selected; live helper observed in archive_write_disk_data_block during progress; complete extraction/preflight pending",
     "archive_bytes": 19203380932,
     "archive_sha256": "8255c25eb5ea84dc6a13a7d7de487c5ef6829fa733a5d7a2019e05e6cc63c59d",
     "linux_backup": "/home/macvm/installation-data/install-analysis/boot120-local-UpdateBundle-25G83.zip",
