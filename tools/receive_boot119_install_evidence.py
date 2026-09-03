@@ -25,6 +25,10 @@ TRANSFER_KINDS = {
         'boot120-local-prepare-crash-20260903-1330.tar.gz',
         '/boot120-local-prepare-crash.tar.gz',
     ),
+    'boot120-b015-crash': (
+        'boot120-b015-crash-20260903-1540.tar.gz',
+        '/boot120-b015-crash.tar.gz',
+    ),
     'boot120-local-product-info': (
         'boot120-local-product-25G83-Info.plist',
         '/boot120-local-product-info.plist',

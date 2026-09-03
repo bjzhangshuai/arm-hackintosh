@@ -46,6 +46,12 @@ class InstallEvidenceTransferTests(unittest.TestCase):
             with self.subTest(kind=kind), self.assertRaises(ValueError):
                 resolve_transfer(kind)
 
+    def test_b015_crash_uses_new_fixed_private_destination(self):
+        self.assertEqual(resolve_transfer('boot120-b015-crash'), (
+            Path('/home/macvm/installation-data/install-analysis/boot120-b015-crash-20260903-1540.tar.gz'),
+            '/boot120-b015-crash.tar.gz',
+        ))
+
 
 if __name__ == '__main__':
     unittest.main()

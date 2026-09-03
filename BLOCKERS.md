@@ -2,7 +2,37 @@
 
 ## Current validation status — 2026-09-03, Boot120 local prepare repair
 
-**Latest (14:35 UTC):** B015 reached actual installation operations: mutable
+**User hold (2026-09-04 CST):** Finish the current root-cause repair and necessary
+isolated tests, then stop BEFORE another installer launch or VM restart. The
+user plans to install an RTX 4060 Ti. Do not infer permission to shut down the
+physical host, production VMs, outer isolation VM or current inner VM. No timers,
+automatic retries or scheduled follow-ups. GPU integration waits for the user's
+hardware-ready confirmation and a reviewed isolation/driver plan.
+
+**Latest diagnosis (2026-09-04 CST):** B016 is a storage-presentation defect, not
+another copy of the CFRelease crash. The full new report and system.log confirm
+`NSInvalidArgumentException: nil file argument` in SFR ticket-path reading.
+Native libpartition selects one primary media and searches only its children;
+live IORegistry proves disk0/system, disk1/Recovery and disk2/iSC ALL advertise
+`EmbeddedDeviceTypeRoot=Yes`. iSCPreboot itself is mounted, healthy enough to
+read, and writable, but is not a child of the first primary disk. A single-primary
+offline composition tool and fail-closed legacy-launch gate are prepared and
+tested on disposable fixtures only. Actual disk migration, AUX/firmware block
+graph validation and another installer launch are NOT done and are held for the
+user. See `docs/boot120-primary-disk-repair.md`. Do not claim installation fixed.
+
+**Earlier (15:44 UTC):** B015 passed complete local unarchive/integrity at guest
+15:37:57 and retrieved zero OS packages. The corrected B012/B013 adapter actually
+matched new UpdateBrain PID 11622, performed its one permitted PC correction,
+and detached normally. Nevertheless the service subsequently exited via
+self-sent SIGABRT at guest 15:40:47, propagating MSU 7 / SUMacController 7723 /
+OSInstallerSetup 1007. The attempt failed; COMPLETED/1.0 is not success. The
+full new crash stack is being preserved before deciding whether this is an
+adapter defect or a later failure. No further installer launch or VM restart
+has occurred. QEMU itself remains running with target I/O ok and zero failed
+reads/writes. B016 below tracks this investigation.
+
+**Earlier (14:35 UTC):** B015 reached actual installation operations: mutable
 product creation and prior-update cleanup succeeded, and local
 `OSISUnarchiveMobileSoftwareUpdateOperation` started at guest 14:32:54. This is
 an active local-archive installation phase, not OS installation completion.
@@ -43,6 +73,40 @@ and validated; actual one-shot correction/resumed installation is not yet proven
 Installation, account creation and installed-system boot remain incomplete. The
 existing 25G72 IPSW was reused for recovery boot, not a complete offline workflow.
 See `docs/boot120-install-progress.md` for current evidence; Boot119 below is history.
+
+### B016 — Multiple primary disks break native iSC discovery; nil path then aborts
+
+- **State:** Root cause established; offline migration primitive and launch
+  refusal tested. NOT deployed or installer-verified; user holds next start.
+- **Evidence:** `b015-coverage-gated-bridge-active.log` records the exact matched
+  process/caller/frame, one repair, and clean detach with null_repaired=True.
+  Serial records UpdateBrain PID 11622 running, then self-sent SIGABRT at guest
+  15:40:47. Full private crash archive SHA256 is
+  `aa00eeb687558455f46b4f4ecd98eb71dcd8b36c6f05cd6043c5d483979213a7`.
+  The later stack is NSData file reading -> `_NSIHDataForTicketPath:error:` ->
+  `currentSFRManifestHash` -> `verify_target_update_restoreversion`, proving
+  continuation beyond the old NULL cleanup. Do not conflate the two defects.
+- **Code/root:** In exact 25G72 libpartition, `isPrimaryMedia` delegates to
+  `isEmbeddedDeviceTypeRoot`; `primaryMedia` returns the first match;
+  `_containerWithPhysticalStoreRole:` enumerates its `children` only.
+  25G83 UpdateBrain `currentSFRManifestHash` fails to guard a nil `currentPath:`
+  before invoking NSData. Missing directories alone do not explain nil: the
+  directory helper returns the composed path without checking its existence
+  when create=NO. Mounted iSCPreboot is on separate disk2, while disk0 is first.
+- **Correction candidate:** Compose the preserved iSC, optional EFI, normal
+  system and Recovery partitions under one GPT/root device, retaining all
+  opaque partition bytes and identities. Do not reorder three competing roots,
+  fabricate a ticket/hash, bypass version checks or patch NSData. The old
+  split-install launch is rejected before run-directory creation or disk writes.
+- **Pending:** Safe closed backup/migration, AUX utility/NVRAM versus relocated
+  iSC ownership and firmware-root graph validation, then explicit user release
+  of the startup hold and one controlled installation test. The current runner
+  source in isolated Linux was NOT overwritten while its shell remains active;
+  modified sources were tested in a separate private staging directory.
+- **Validation:** 129 focused/regression tests pass in isolated Linux (29 new
+  tests); syntax checks pass. Tests use disposable synthetic disks, not the live
+  installation image. At 16:23 UTC QEMU is running, target I/O ok, failed
+  reads/writes zero and no native crash. No new installer launch occurred.
 
 ### B014 — Log-first retry exposes missing staging compatibility coverage
 

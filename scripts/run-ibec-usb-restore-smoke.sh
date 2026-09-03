@@ -66,6 +66,15 @@ RECOVERY_IMAGE="${MACVM_RECOVERY_IMAGE:-}"
 RECOVERY_VOLUME_UUID="${MACVM_RECOVERY_VOLUME_UUID:-}"
 EXPOSE_RECOVERY_VIRTIO="${MACVM_EXPOSE_RECOVERY_VIRTIO:-NO}"
 RECOVERY_VALIDATOR="${MACVM_RECOVERY_VALIDATOR:-$REPO_ROOT/tools/build_vmapple_recovery.py}"
+# B016: separate root-role system/iSC/Recovery disks all advertise primary
+# media. libpartition selects one primary and searches only its children, so
+# the installer receives no iSC container. Do not repeat that known-bad layout.
+# Legacy recovery-only diagnostics remain available; installed-data migration
+# and the next launch are held for the user's hardware-ready confirmation.
+if [[ -n "$INSTALL_TARGET_IMAGE" && ( "$EXPOSE_ISC_VIRTIO" == "YES" || "$EXPOSE_RECOVERY_VIRTIO" == "YES" ) ]]; then
+  echo 'macvm: B016 split primary-disk installation topology is invalid; no launch or disk writes performed' >&2
+  exit 78
+fi
 RAMDISK_OVERRIDE_IMAGE="${MACVM_RAMDISK_OVERRIDE_IMAGE:-}"
 RAMDISK_OVERRIDE_ADDRESS="${MACVM_RAMDISK_OVERRIDE_ADDRESS:-}"
 RAMDISK_OVERRIDE_VALIDATOR="${MACVM_RAMDISK_OVERRIDE_VALIDATOR:-$REPO_ROOT/tools/validate_ramdisk_override.py}"
