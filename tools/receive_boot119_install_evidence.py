@@ -25,6 +25,10 @@ TRANSFER_KINDS = {
         'boot120-local-product-25G83-Info.plist',
         '/boot120-local-product-info.plist',
     ),
+    'boot120-offline-payload': (
+        'boot120-local-UpdateBundle-25G83.zip',
+        '/boot120-local-UpdateBundle-25G83.zip',
+    ),
 }
 
 
@@ -36,11 +40,26 @@ def resolve_transfer(kind):
     return DESTINATION.parent / name, endpoint
 
 
+def transfer_policy(kind, expected_bytes=None):
+    """Only the explicit offline payload gets a larger, exact length limit."""
+    resolve_transfer(kind)
+    if kind == 'boot120-offline-payload':
+        if type(expected_bytes) is not int or not 18_000_000_000 <= expected_bytes <= 21_000_000_000:
+            raise ValueError('exact observed 25G83 archive size required')
+        return expected_bytes, 3600, 120
+    if expected_bytes is not None:
+        raise ValueError('large transfer sizing is not valid for evidence endpoints')
+    return MAX_BYTES, 600, 30
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--kind', choices=tuple(TRANSFER_KINDS), default='updatebrain')
+    parser.add_argument('--expected-bytes', type=int,
+                        help='required exact observed size for offline payload only')
     args = parser.parse_args()
     destination, endpoint = resolve_transfer(args.kind)
+    maximum, duration, socket_timeout = transfer_policy(args.kind, args.expected_bytes)
     if (platform.system() != 'Linux' or platform.machine() != 'x86_64'
             or platform.node() != 'macvm-validation'
             or os.environ.get('MACVM_DEBUG_ENV_CONFIRMED') != 'YES'):
@@ -49,7 +68,10 @@ def main():
         raise RuntimeError('isolated VM marker missing')
     if not Path('/home/macvm/installation-data').is_mount() or destination.exists():
         raise RuntimeError('data mount missing or evidence already exists; never overwrite')
-    deadline = time.monotonic() + 600
+    capacity = os.statvfs(destination.parent)
+    if args.expected_bytes is not None and capacity.f_bavail * capacity.f_frsize < maximum + 1024**3:
+        raise RuntimeError('insufficient isolated data capacity for offline copy')
+    deadline = time.monotonic() + duration
     complete = False
 
     class Handler(BaseHTTPRequestHandler):
@@ -59,7 +81,8 @@ def main():
                 size = int(self.headers.get('Content-Length', '0'))
             except ValueError:
                 size = 0
-            if (self.path != endpoint or not 1 <= size <= MAX_BYTES
+            if (self.path != endpoint or not 1 <= size <= maximum
+                    or (args.expected_bytes is not None and size != args.expected_bytes)
                     or self.headers.get('Transfer-Encoding') or complete):
                 self.send_error(400, 'fixed archive endpoint and bounded Content-Length required')
                 return
@@ -67,7 +90,7 @@ def main():
                 # Exclusive create also rejects symlinks/existing files.
                 with destination.open('xb') as output:
                     os.chmod(destination, 0o600)
-                    self.connection.settimeout(30)
+                    self.connection.settimeout(socket_timeout)
                     remaining = size
                     digest = hashlib.sha256()
                     while remaining:
@@ -90,7 +113,7 @@ def main():
 
     with HTTPServer(('127.0.0.1', 18567), Handler) as server:
         server.timeout = 1
-        print('MACVM_INSTALL_ARCHIVE_LISTEN loopback=127.0.0.1:18567 timeout=600s', flush=True)
+        print(f'MACVM_INSTALL_ARCHIVE_LISTEN loopback=127.0.0.1:18567 timeout={duration}s max_bytes={maximum}', flush=True)
         while not complete and time.monotonic() < deadline:
             server.handle_request()
     if not complete:

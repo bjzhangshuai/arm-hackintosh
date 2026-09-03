@@ -1,5 +1,9 @@
 #!/bin/bash
 # Repackage preserved, unchanged files locally. No CDN download or installer.
+# RETIRED: this Recovery's BOM/ditto writer truncates offsets above 4 GiB.
+# Kept as evidence only; use the source-reviewed libarchive ZIP64 workflow.
+echo 'Refusing retired BOM archive writer: known 32-bit offset truncation' >&2
+exit 78
 set -euo pipefail
 [[ $(uname -s) == Darwin && $(uname -m) == arm64 ]] || exit 78
 [[ $(sysctl -n hw.model) == VirtualMac2,1 && $(sw_vers -buildVersion) == 25G72 && $(id -u) == 0 ]] || exit 78

@@ -380,7 +380,7 @@ the initially staged `*-Static` directories are not a verified Recovery route.
 Do not clear the Recovery environment marker or force a successful unarchive.
 
 Instead, `guest-pack-boot120-local-payload.sh` is repackaging the master clone
-into a normal local UpdateBundle.zip, using Apple's existing ditto ZIP64 writer
+into a normal local UpdateBundle.zip, initially using the existing ditto writer
 with compression level zero and preserved resource metadata. The result is
 **not** claimed to be Apple's original ZIP bitstream; embedded payload, manifest
 and signature files are unchanged and later normal Apple validation must pass.
@@ -397,3 +397,55 @@ mutators and disables existing-bundle relabelling. It has one continue, existing
 observation limits and cleanup on error/SIGINT. **67 focused tests pass** in the
 isolated Linux VM. This is prepared code, not proof of a successful repair or
 installation. No recurring automation was created or resumed.
+
+### ZIP64 preparation and validation, guest 11:16–11:22 UTC
+
+The first repackaging command's output was **not a valid large ZIP**. Although
+the file is 19,204,730,974 bytes, its legacy EOCD records central-directory
+offset 2,024,544,885; the real central directory starts at 19,204,414,069. The
+difference is exactly 17,179,869,184 (four 32-bit wraps). Neither ZIP64 EOCD nor
+ZIP64 locator exists. A real member is 4,456,630,130 bytes, so individual sizes
+also require ZIP64. Recovery's unzip explicitly supports ZIP64; this is not
+just a missing feature in the checker. The retired BOM/ditto workflow now refuses
+execution and the invalid output was preserved as
+`/Volumes/macos26/macvm-rejected-bom-archive-25G83.zip`. Only its identified CRC
+test PID 8357 was stopped; no installer/VM was stopped and no archive was deleted.
+
+The existing guest tool reports bsdtar 3.5.3 / **libarchive 3.7.4**. Its
+[upstream ZIP writer](https://github.com/libarchive/libarchive/blob/v3.7.4/libarchive/archive_write_set_format_zip.c)
+has explicit ZIP64 entry offsets/sizes and ZIP64 end records. A tiny fixture using
+`zip:zip64=1,zip:compression=store` passed unzip CRC and footer/locator checks.
+A separate ditto read probe failed; the subsequent exact installer code review
+establishes that ditto is **not its reader**: `OSISStreamingZipExtractor`
+0x2333c unconditionally calls `_unzipViaLibarchiveWithError:`, using the archive
+read APIs, not BOM. A matching libarchive extraction of the fixture then passed
+and its Info.plist matched the original. This corrected the earlier mistaken
+reader assumption before a second full archive was generated.
+
+`guest-pack-boot120-zip64.sh resume-after-reader-check` now runs the full local
+ZIP64/store archive build, followed by complete CRC verification. It neither
+overwrites the retained payload nor fetches another system package. The prior
+standalone cleanup debugger is detached, and combined B010/B012 **read-only live
+contract verification passed**, including the exact protected staging anchor.
+The actual combined correction and successful installer preflight remain pending.
+
+An additional exact-length, one-shot local transfer endpoint is prepared to
+retain a verified archive outside the inner APFS installation target, within
+the isolated Linux data filesystem. It is not a GitHub upload and has not yet
+received a payload. Its five new policy tests pass; prior evidence endpoints
+retain their original 64 MiB limits. No automatic monitoring is involved.
+
+The read-only local ZIP64 validator additionally rejects missing/wrapped end
+records, out-of-bounds locators, trailing bytes, duplicate/unsafe paths,
+inventory/Info.plist mismatches and CRC failures. Ten small regression cases pass;
+the focused isolated-Linux total is **82 tests**. These are packaging/adapter
+tests, not proof of an installed OS or Apple signature acceptance. The full ZIP64
+archive was still growing at the latest guest 11:29 observation (16,420,915,200
+bytes); no archive-backed installer launch or B012 live correction has occurred.
+
+The writer subsequently completed at **19,203,380,932 bytes**. The guest's
+single full CRC test is running (unzip PID 8673, parent packer 8506), and the
+archive is still `.zip64.partial` until this check passes. QMP at 11:31:27 UTC
+reports running, target I/O ok, zero failed reads/writes and no native crash.
+A one-shot exact-length backup receiver is now listening on isolated Linux
+loopback 18567; no upload/backup-completion claim follows from that listener.

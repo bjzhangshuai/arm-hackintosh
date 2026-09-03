@@ -7,7 +7,7 @@ exec >/dev/console 2>&1
 echo MACVM_BOOT120_ARCHIVE_PROGRESS_BEGIN
 date -u
 product=/Volumes/macos26/macvm-local-product-25G83
-for name in UpdateBundle.zip.partial UpdateBundle.zip LOCAL_ARCHIVE_READY ARCHIVE_UI_LAUNCH_REQUESTED; do
+for name in UpdateBundle.zip.partial UpdateBundle.zip64.partial UpdateBundle.zip LOCAL_ARCHIVE_READY ARCHIVE_UI_LAUNCH_REQUESTED OFFLINE_EXPORT_ACCEPTED; do
     [[ ! -f "$product/$name" ]] || stat -f '%z bytes %N' "$product/$name"
 done
 df -Pk /Volumes/macos26

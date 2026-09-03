@@ -9,6 +9,19 @@
   "previous_boot_backup": "/home/macvm/installation-data/boot119-before-internal-20260903",
   "outer_storage_reference": "configs/boot119-install-storage.json: outer_vm and isolated_linux only; old inner USB attachments are historical",
   "isolated_data_mount_uuid": "432e46d4-88c5-4885-bf16-1ecdb0f90ba5",
+  "offline_installer_product": {
+    "build": "25G83",
+    "version": "26.6.2",
+    "recovery_build": "25G72",
+    "preserved_guest_path": "/Volumes/macos26/macvm-offline-25G83-boot120",
+    "regular_files": 2233,
+    "regular_file_bytes": 19202615016,
+    "preservation": "verified APFS clone, same volume; not independent-disk backup",
+    "working_guest_path": "/Volumes/macos26/macvm-local-product-25G83",
+    "archive_status": "19,203,380,932-byte local ZIP64 archive written; full guest CRC verification in progress; not yet accepted",
+    "archive_bytes": 19203380932,
+    "large_remote_os_download_authorized": false
+  },
   "system_target": {
     "image": "/home/macvm/installation-data/macos-26-system.raw",
     "bytes": 137438953472,
