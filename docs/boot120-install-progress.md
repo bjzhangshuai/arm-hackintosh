@@ -503,3 +503,93 @@ NULL guard retained. Any metadata contract error, unknown stop, SIGINT or actual
 NULL correction ends the session and detaches as before. No budget is enlarged
 and existing-bundle relabelling stays disabled. Five new lifetime regression
 cases pass; the focused isolated-Linux suite now has **87 passing tests**.
+
+### Local backup and native archive acceptance
+
+At Linux 11:59:13 UTC the one-shot receiver completed HTTP 201 for exactly
+19,203,380,932 bytes, streaming SHA-256
+8255c25eb5ea84dc6a13a7d7de487c5ef6829fa733a5d7a2019e05e6cc63c59d.
+The guest's same-inode export completed too. The receiver exited normally and
+no longer listens. The preserved copy is
+`/home/macvm/installation-data/install-analysis/boot120-local-UpdateBundle-25G83.zip`.
+It is outside the inner APFS installation target but on the same isolated data
+disk, **not** an independent physical-disk or GitHub backup.
+
+Native Linux validation then passed: ZIP64 central directory offset
+19,203,000,553 and size 380,281; 2,484 total entries; **2,233 regular files /
+19,202,615,016 bytes**; byte-identical Info.plist; all CRCs passed. The JSON report
+is `native-zip64-validation.json` in the Boot120 run directory and was published
+only on the existing loopback control server for the guarded temporary cleanup.
+Apple signatures were **not** evaluated by this packaging check and must still
+pass the normal installer. No further system package was downloaded.
+
+The guarded cleanup has now completed: only the invalid
+`macvm-rejected-bom-archive-25G83.zip` (19,204,730,974 bytes, task-generated) was
+removed. Its 4,096-byte prefix and 316,905-byte central-directory/EOCD evidence
+remain under the private master directory; the original payload can reproduce
+the failed packaging experiment. Source assets, valid ZIP and verified Linux
+copy remain. Guest available space rose to **96,351,652 KiB** (~91.9 GiB).
+
+At Linux 12:02:36 UTC the corrected combined session was started with an outer
+90-minute SIGINT deadline (one session, no automatic retries). Live CF and
+protected-anchor instruction contracts passed; the log reports both guards
+armed. QMP afterward remains running, target I/O ok, zero failed reads/writes,
+no native crash. The metadata observation budget remains 100000; normal retirement
+keeps the one-shot NULL guard active. **No NULL call has been repaired yet.**
+
+The archive-backed launcher ran once: InstallAssistant PID 9159, helper 9166,
+UpdateBrainService 9169. The staging bridge created protected children and
+provided the missing requested extended-attribute responses; launchd confirms
+the UpdateBrain service actually reached running state, instead of the former
+EFTYPE 79 failure. A genuine VNC capture (`84-local-installer-view.png`) shows
+the macOS Tahoe welcome screen with enabled Continue. One Continue click was
+issued after observing that screen. This proves local UI/service startup, not
+the later B012 cleanup correction or a completed installation.
+
+The actual storage observer also confirms eight normal RoleAccountStaging
+resolutions: errno 0, class 0f, original protected anchor unchanged. The normal
+license screen and its confirmation were completed with one observed click each.
+Capture `89-local-target-selection.png` shows the single `macos26` target,
+137.23 GB total / 98.66 GB available, matching the approved internal disk and
+the preceding space check. The target-selection click was issued once; the
+actual installation Continue action is still pending at this checkpoint.
+
+### Local product selection and verified installation start
+
+The metadata guard reached its normal bound (100001 observations, create=132,
+existing=0, extflags=8721) and retired only its own breakpoints. The log confirms
+`null_guard_still_armed=1 metadata_writes_enabled=0`; the B012 correction has not
+yet hit. No guest restart or debugger interruption occurred.
+
+Several VNC clicks produced no confirmed UI transition. A bounded input trace
+showed QEMU keyboard events, successful USB reports and queue consumption. A
+new read-only QMP/HMP memory adapter then observed WindowServer, Terminal and
+InstallAssistant stacks without interrupting the existing debugger. Live BootKC
+instructions and CoreFoundation UUID passed. Symbolization against the matching
+cache (slide 0x777c000) shows ordinary WindowServer service waits and the
+InstallAssistant NSApplication event loop, not an observed unpack/preflight
+hang. The first probe ended on a null process-list head after collecting the
+selected processes; list-head handling was subsequently corrected. Its partial
+output must not be described as an atomic or fully completed snapshot.
+
+The five new adapter tests cover exact response extents/addresses, little-endian
+and unaligned reads, error replies, read budget and rejection of physical MMIO,
+including the clear-on-read PVG IRQ addresses. The combined focused suite has
+**92 passing isolated-Linux tests**. No tests ran on the production Mac.
+
+A direct QMP pointer/button sequence successfully focused Terminal (capture 97),
+and the reviewed read-only status command actually executed at guest 12:24:21 UTC.
+The fresh log confirms helper 9166, brain 9169 and assistant 9159 remain alive.
+It explicitly selected the local SharedSupport `UpdateBrain.zip` and
+`UpdateBundle.zip`, identifying **26.6.2 / 25G83**. Earlier catalog compatibility
+script warnings did not prevent product selection; no new large OS download is
+established. This is local-payload reuse, not a promise of zero Apple metadata or
+personalization traffic.
+
+The subsequent QMP Continue click produced the actual installation progress bar
+and Cancel button in `99-local-install-continue-qmp.png`, rather than the previous
+target-selection screen. The original target is unchanged. At Linux 12:26:26 UTC,
+QMP is running, target I/O ok, failed reads/writes zero, no native crash.
+Further payload consumption, B012 correction and installation remain unverified.
+Use the working QMP click path with observed screenshots; do not restart the
+installer or claim the earlier unconfirmed VNC clicks started installation.

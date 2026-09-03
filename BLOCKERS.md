@@ -1,13 +1,18 @@
 # Blockers
 
-## Current validation status — 2026-09-03, Boot120 local installation preparation
+## Current validation status — 2026-09-03, Boot120 local installation resumed
 
 Boot120's internal target passes the actual prerequisite check and reaches the
 installation progress UI. At 10:23 UTC the installer shows a software-update
 personalization failure (B012), traced to UpdateBrain's CFRelease(NULL) cleanup.
-The already downloaded 25G83 payload is preserved and is being repackaged locally.
+The already downloaded 25G83 payload is preserved, locally repackaged as validated
+ZIP64 and backed up outside the inner APFS target.
 The first local UI launch exposed the previously established B010 tmpfs staging
-problem again; the next bounded session is prepared to cover both contracts.
+problem again; the bounded combined session now passes actual B010 service
+startup and retains the B012 one-shot guard after normal metadata retirement.
+The real 26.6.2/25G83 local product is selected, and screenshot 99 shows actual
+installation progress after a verified QMP click. B012 has not yet hit or been
+repaired. Packaging checks and progress UI do not prove installation success.
 Installation, account creation and installed-system boot remain incomplete. The
 existing 25G72 IPSW was reused for recovery boot, not a complete offline workflow.
 See `docs/boot120-install-progress.md` for current evidence; Boot119 below is history.
@@ -292,13 +297,14 @@ See `docs/boot120-install-progress.md` for current evidence; Boot119 below is hi
   probe passed. The full 19,203,380,932-byte archive subsequently passed guest
   CRC, was promoted to `UpdateBundle.zip`, and has `LOCAL_ARCHIVE_READY` after
   restoring the unused static preference. Its separate isolated-Linux copy and
-  native ZIP64/CRC/inventory check are still pending. No large remote OS payload
+  native ZIP64/CRC/inventory check have now completed successfully. No large remote OS payload
   was downloaded by this local preparation.
-- **Next bounded experiment:** Complete and verify the local backup, then use one
+- **Next bounded experiment:** Use one
   debugger session for the existing B010 metadata contract plus one B012 cleanup
   correction. `tools/bridge_boot120_local_install.py` preserves both scopes and
   budgets; no old/unknown bundle relabelling is enabled. The focused suite has
-  **87 passing isolated-Linux tests**, including detach-on-SIGINT/error tests.
+  **92 passing isolated-Linux tests**, including detach-on-SIGINT/error and
+  read-only HMP memory-boundary tests.
   Prior `tmpfs-metadata-compat.log` proves the metadata observation budget was
   actually exhausted (100001 observations). The combined session now retires
   only metadata breakpoints on that explicit normal limit, keeping the separate
