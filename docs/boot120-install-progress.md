@@ -655,3 +655,21 @@ The combined isolated-Linux check now passes **94 tests**, including five new
 static launcher safety contracts; `bash -n` also passes. Those static contracts
 are not a substitute for the pending actual installation acceptance. No tests
 ran on the production Mac or physical Linux host. No automation was created.
+
+### Input delivery while the bounded debugger is active
+
+The first launch command did not execute: VNC lost characters and the shell
+reported `crl: command not found`. Lengthening wall-clock key delays did not
+reliably fix it. The QEMU input trace also omitted complete requested keys,
+while delivered keys drained the HID queue. Source inspection found that
+`ui/input.c::qemu_input_event_send` silently drops input when the VM is not
+running, and `qmp_send_key` does not propagate a failure. This matters while
+the existing debugger briefly stops/resumes execution at its breakpoints.
+
+`qmp_keyboard.py` instead uses `qmp_input_send_event`, whose run-state check
+rejects the entire batch with an explicit `VM not running` error before any
+delivery. It retries only that rejection, with a finite bound; transport and
+other failures never trigger another send. It cannot resume/reset the VM, and
+typing does not implicitly execute a command. Eight isolated-Linux unit tests
+cover this contract. All input attempts before actual launch are setup input,
+not additional installer retries. The one-launch marker remains authoritative.
