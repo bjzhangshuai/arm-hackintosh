@@ -19,6 +19,8 @@ vm/
 
 # Backups retain sources, not private assets or compilation caches.
 /release-staging/
+# Raw session captures and diagnostics stay local; curated evidence lives in evidence/.
+/artifacts/
 /third_party/reims-vgpu/target/
 /third_party/metal2vulkan/target/
 *.pem

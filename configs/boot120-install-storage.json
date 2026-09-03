@@ -1,0 +1,52 @@
+{
+  "status": "Boot120 running; guest internal target verified; installation preflight pending",
+  "run_directory": "/home/macvm/runs/aux-26.6/xnu-imgsrc-reims-boot120-internal-install",
+  "qemu_pid_at_launch": 974460,
+  "qemu_executable": "/home/macvm/src/macvm/build/qemu-boot119-graphics-storage/qemu-system-aarch64",
+  "qemu_sha256": "bfedb312ba18bcaeed2ca67f449575295eb42c2a986308676e7ab17e809ce411",
+  "vcpu": 8,
+  "memory_gib": 16,
+  "previous_boot_backup": "/home/macvm/installation-data/boot119-before-internal-20260903",
+  "outer_storage_reference": "configs/boot119-install-storage.json: outer_vm and isolated_linux only; old inner USB attachments are historical",
+  "isolated_data_mount_uuid": "432e46d4-88c5-4885-bf16-1ecdb0f90ba5",
+  "system_target": {
+    "image": "/home/macvm/installation-data/macos-26-system.raw",
+    "bytes": 137438953472,
+    "drive_id": "macvm-install-internal",
+    "device_model": "vmapple-virtio-blk-pci",
+    "variant": "root",
+    "guest_internal_verified": true,
+    "guest_disk": "disk0",
+    "guest_physical_store": "disk0s2",
+    "guest_container": "disk5",
+    "guest_volume": "disk5s1",
+    "volume_name": "macos26",
+    "volume_uuid": "31209BA2-BC1F-4D51-99C1-4AFF986CB8AA",
+    "container_uuid": "6C0D6E74-EBBB-4A40-A7F1-AFDE0A1B34FD",
+    "gpt_uuid": "3686695A-E650-4E94-BED1-C3302BB3FF7A",
+    "may_reformat": false,
+    "os_installed": false
+  },
+  "preserved_boot_state": {
+    "aux": "aux.img",
+    "firmware_root": "root.img",
+    "firmware_usb": "usb.img",
+    "recovery_overlay": "recovery-overlay.qcow2",
+    "recovery_backing": "/home/macvm/installation-data/boot119-before-internal-20260903/offline/recovery-preserved.raw",
+    "metadata_diagnostic_image_attached": false
+  },
+  "reboot_handoff": {
+    "reboot_action": "shutdown",
+    "shutdown_action": "pause",
+    "installed_system_launcher_verified": false,
+    "firmware_root_is_installation_target": false,
+    "must_not_rerun_recovery_launcher_over_existing_run": true
+  },
+  "safety": [
+    "This is a checkpoint, not an executable resume procedure.",
+    "Verify PID, executable, run directory and current QMP state before any action.",
+    "Preserve the running outer isolation VM and its live NBD connection.",
+    "Do not modify any production VM, system QEMU, packages or passthrough configuration.",
+    "Never resume shutdown or I/O-error state as if it were a debugger pause."
+  ]
+}

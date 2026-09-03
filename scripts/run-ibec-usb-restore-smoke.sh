@@ -55,6 +55,8 @@ KEEP_QEMU_RUNNING_AFTER_HELPER="${MACVM_KEEP_QEMU_RUNNING_AFTER_HELPER:-NO}"
 QEMU_LOG_ITEMS="${MACVM_QEMU_LOG_ITEMS:-}"
 ROOT_IMAGE="${MACVM_ROOT_IMAGE:-}"
 EXPOSE_ROOT_VIRTIO="${MACVM_EXPOSE_ROOT_VIRTIO:-NO}"
+# Separate opt-in: never make the existing read-only BaseSystem root writable.
+INSTALL_TARGET_IMAGE="${MACVM_INSTALL_TARGET_IMAGE:-}"
 ISC_IMAGE="${MACVM_ISC_IMAGE:-}"
 LEGACY_EXPOSE_AUX_VIRTIO="${MACVM_EXPOSE_AUX_VIRTIO:-}"
 EXPOSE_ISC_VIRTIO="${MACVM_EXPOSE_ISC_VIRTIO:-${LEGACY_EXPOSE_AUX_VIRTIO:-NO}}"
@@ -267,10 +269,11 @@ prepare_gdb_trace_script() {
   fi
 
   output_script="$RUN_DIR/$output_name"
-  "$PYTHON_BIN" - "$source_script" "$output_script" "$GDB_PORT" <<'PY'
+  "$PYTHON_BIN" - "$source_script" "$output_script" "$GDB_PORT" "$INSTALL_TARGET_IMAGE" <<'PY'
 from pathlib import Path
 import hashlib
 import re
+import shutil
 import sys
 
 source = Path(sys.argv[1]).resolve()
@@ -279,6 +282,16 @@ port = sys.argv[3]
 source_re = re.compile(r"^(?P<indent>\s*)source\s+(?P<path>\S+)(?P<tail>.*)$")
 remote_re = re.compile(r"target remote 127[.]0[.]0[.]1:[0-9]+")
 copied: dict[Path, Path] = {}
+runtime_aliases = {}
+if sys.argv[4]:
+    # Installation continuation must not replace earlier boot evidence in the
+    # shared restore tree. Scope both dump outputs and their subsequent reads.
+    for name in ('iBSS.runtime-7006c000-70120000.bin', 'iBEC.runtime-last.bin'):
+        original = Path('/home/macvm/macos-restore/26.6/restore-chain') / name
+        scoped = target.parent / name
+        if original.is_file() and not scoped.exists():
+            shutil.copyfile(original, scoped)
+        runtime_aliases[str(original)] = str(scoped)
 
 
 def nested_target_for(path: Path) -> Path:
@@ -293,6 +306,8 @@ def copy_gdb_source(path: Path, out: Path) -> None:
     copied[path] = out
     text = path.read_text(encoding="utf-8")
     text = remote_re.sub(f"target remote 127.0.0.1:{port}", text)
+    for original, scoped in runtime_aliases.items():
+        text = text.replace(original, scoped)
     rendered = []
     for line in text.splitlines():
         match = source_re.match(line)
@@ -608,6 +623,18 @@ elif [[ "$EXPOSE_ROOT_VIRTIO" == "YES" ]]; then
   exit 64
 fi
 
+if [[ -n "$INSTALL_TARGET_IMAGE" ]]; then
+  if [[ "$EXPOSE_ROOT_VIRTIO" != "NO" || -n "$ROOT_IMAGE" ]]; then
+    echo "macvm: installation target and staged BaseSystem root are mutually exclusive" >&2
+    exit 64
+  fi
+  if [[ "${MACVM_INSTALL_TARGET_CONFIRMED:-}" != "EXISTING_BOOT119_INTERNAL" ]]; then
+    echo "macvm: explicit existing-installation-target confirmation is required" >&2
+    exit 64
+  fi
+  "$PYTHON_BIN" "$REPO_ROOT/tools/validate_install_target.py" --image "$INSTALL_TARGET_IMAGE"
+fi
+
 if [[ -n "$ISC_IMAGE" ]]; then
   if [[ "$ISC_IMAGE" != /* ]]; then
     echo "macvm: MACVM_ISC_IMAGE must be an absolute path, got: $ISC_IMAGE" >&2
@@ -918,6 +945,17 @@ if [[ -n "$RAMDISK_OVERRIDE_IMAGE" ]]; then
   qemu_args+=(
     -device "loader,file=$RAMDISK_OVERRIDE_IMAGE,addr=$RAMDISK_OVERRIDE_ADDRESS,force-raw=on"
   )
+fi
+
+if [[ -n "$INSTALL_TARGET_IMAGE" ]]; then
+  # B011: UpdateBrain needs a normal internal APFS store. Reuse the existing
+  # target; never create, copy over, or format it here. Keep normal file locking.
+  # Firmware root remains Recovery scratch until installed-boot handoff is ready.
+  qemu_args+=(
+    -drive "if=none,id=macvm-install-internal,format=raw,file=$INSTALL_TARGET_IMAGE,werror=stop,rerror=report"
+    -device "vmapple-virtio-blk-pci,variant=root,drive=macvm-install-internal"
+  )
+  printf '%s\n' "$INSTALL_TARGET_IMAGE" >"$RUN_DIR/install-target.path"
 fi
 
 if [[ "$EXPOSE_ROOT_VIRTIO" == "YES" ]]; then

@@ -1,0 +1,72 @@
+{
+  "status": "live attachment; resume procedure not yet implemented",
+  "outer_vm": {
+    "host": "192.168.8.123",
+    "ssh_port": 30022,
+    "name": "macvm-validation-20260831",
+    "directory": "/home/jansurezhang/apple-m-macos-vm/validation-20260831",
+    "data_image": "installation-data-20260903.qcow2",
+    "data_bytes": 214748364800,
+    "nbd_listen": "127.0.0.1:10893",
+    "export_name": "macvm-install-data-20260903",
+    "export_id": "macvm-install-data-export",
+    "block_node": "macvm-install-data-20260903",
+    "file_node": "macvm-install-data-file"
+  },
+  "isolated_linux": {
+    "hostname": "macvm-validation",
+    "nbd_source": "nbd://10.0.2.2:10893/macvm-install-data-20260903",
+    "device_at_creation": "/dev/nbd0",
+    "filesystem_uuid": "432e46d4-88c5-4885-bf16-1ecdb0f90ba5",
+    "mount": "/home/macvm/installation-data"
+  },
+  "system_target": {
+    "image": "/home/macvm/installation-data/macos-26-system.raw",
+    "bytes": 137438953472,
+    "block_node": "macvm-install-system",
+    "device_id": "macvm-install-usb",
+    "usb_port": "3",
+    "usb_serial": "MACVMINSTALL20260903",
+    "guest_whole_disk_at_creation": "disk6",
+    "guest_physical_store": "disk6s2",
+    "guest_volume_at_creation": "disk7s1",
+    "volume_name": "macos26",
+    "volume_uuid": "31209BA2-BC1F-4D51-99C1-4AFF986CB8AA",
+    "formatted": true,
+    "os_installed": false,
+    "may_reformat": false
+  },
+  "inner_reboot_handoff": {
+    "qmp_reboot_action": "shutdown",
+    "qmp_shutdown_action": "pause",
+    "applied_live": true,
+    "immediate_stop_or_reset_sent": false,
+    "purpose": "Retain state only after guest-requested shutdown or reboot; current firmware root is Recovery scratch, not the new installation target.",
+    "installed_system_launcher_verified": false,
+    "evidence": "install-reboot-policy.json"
+  },
+  "metadata_scratch": {
+    "image": "/home/macvm/installation-data/metadata-contract-20260903.raw",
+    "bytes": 1073741824,
+    "block_node": "macvm-metadata-contract",
+    "device_id": "macvm-metadata-usb",
+    "usb_port": "4",
+    "usb_serial": "MACVMMETA20260903",
+    "guest_whole_disk_at_creation": "disk8",
+    "guest_physical_store": "disk8s1",
+    "container_uuid": "0126FF8F-749C-48BD-967D-4CAA0FE1284B",
+    "volumes": {
+      "macvm-staging": "2DEFBA24-3C0E-4BC2-BA2D-A66AF5879A3A",
+      "macvm-role-staging": "489C9422-DAD7-4130-8DBC-9C934B031438"
+    },
+    "formatted": true,
+    "active_staging_mount": false,
+    "may_reformat": false
+  },
+  "safety": [
+    "Never recreate or format an existing image or filesystem.",
+    "Resolve devices by exact UUID, backing path, capacity and VM identity before use.",
+    "Do not modify production VM, QEMU packages, services or passthrough configuration.",
+    "Do not restart either live VM without preserving and planning the attachment chain."
+  ]
+}

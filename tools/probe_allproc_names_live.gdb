@@ -2,6 +2,7 @@ set pagination off
 set confirm off
 set architecture aarch64
 set print thread-events off
+set remotetimeout 30
 
 # Observe-only process-list probe for the live vmapple kernel.
 # It reads the exported kernproc pointer, walks the proc p_list chain, prints

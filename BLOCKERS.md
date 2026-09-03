@@ -14,15 +14,194 @@
   executable is a **Mach-O 64-bit arm64 executable**; the boot log identifies
   **Darwin 25.6.0 / RELEASE_ARM64_VMAPPLE**, and the same BaseSystem's
   SystemVersion identifies **macOS 26.6 / 25G72**. This is not x86 macOS.
-- After capture, QMP reports **running**, **8 vCPU**, **17179869184 bytes RAM**.
-  Boot119 remains alive; no new boot or installer Continue click was performed
-  after the accepted welcome capture. No disk selection, installation completion,
+- At acceptance, QMP reported **running**, **8 vCPU**, **17179869184 bytes RAM**.
+  Boot119 was left alive without another boot or installer Continue click at that
+  checkpoint. See the subsequent installation attempt below. No disk selection, installation completion,
   installed-system boot, hardware GPU acceleration, or macOS 27 success is claimed.
 - The five earlier transient fence-timeout/writeback losses and unsupported
   texture formats remain open. Both QEMU stdout/stderr are empty at this
   checkpoint; that is not a claim that every graphics path is implemented.
 - Evidence, hashes, reproducibility limits, and test gates:
   [Boot119 installer acceptance](docs/boot119-installer-acceptance.md).
+
+### B010 — Installation follow-through: UpdateBrain launch constraint failure
+
+- On the user's subsequent request to finish installation, the welcome Continue
+  button was clicked once. After loading installation information, the real GUI
+  reported that required installation content could not be downloaded. Evidence:
+  `artifacts/boot119/install-20260903032545/03-info-later.png`.
+- The guest installation log localizes the failure **after successful download
+  and extraction** of the predicate product metadata and `UpdateBrain.zip`.
+  `OSISPredicateUpdateInstallerProduct` reports fetch success at 03:29:35 UTC;
+  extraction succeeds at 03:29:45. At 03:30:31 the update-brain wakeup fails with
+  `SUMacControllerErrorPreflightWakeupFailed=7721`, underlying
+  `MobileSoftwareUpdateErrorDomain/MSU_ERR_FAILED_BRAIN_LOAD=27`, "Could not create
+  connection to update brain service". This is not a demonstrated download or
+  DNS failure. ReportCrash PID 5587 appears while wakeup is pending.
+- The matching ARM64 UpdateBrain crash report establishes `CODESIGNING`, code 4,
+  `Launch Constraint Violation`, before application frames. AMFI logs
+  `c[4]p[1]m[1]e[0]`: the executable's own launch constraint does not match.
+  Reading its unmodified Apple signature with guest `codesign -d -vvvv` reveals
+  exactly `is-sip-protected=true` and `validation-category=1`. AMFI already
+  reports validation category 1; the staged executable has no `restricted` file
+  flag and lives on the Recovery Data **tmpfs**. Thus the missing SIP-protected
+  launch location is the immediate mismatch, not an ARM CPU exception or DNS.
+  Why roleaccountd staging lacks the expected protection, and the appropriate
+  filesystem-level correction, remain under investigation. No signature was
+  replaced, no launch constraint was stripped, and no retry loop was started.
+- Source-level follow-through: the matching tmpfs `tmpfs_alloc_file` passes type,
+  UID/GID/mode to `tmpfs_alloc_node` but does not store `vnode_attr.va_flags`.
+  The vnode creation fallback in XNU `kpi_vfs.c:vnode_setattr_fallback` only
+  supplies extended security/ACL metadata, not file flags. The protected staging
+  root and unprotected `exec`/payload match this omission. A normal `chflags`
+  attempt on a newly created empty probe file is denied by SIP; no protection
+  setting was disabled to work around that denial.
+- A temporary, opt-in **metadata compatibility bridge** is under validation.
+  It verifies exact 25G72 instruction/layout contracts and only adds the lost
+  `SF_RESTRICTED` bit beneath the already-protected RoleAccountStaging anchor.
+  Existing-object repair is limited to the known Apple cache and its `exec`/`tmp`
+  directories; unknown bundles/probe files are excluded. New creations must
+  already request the bit and have a protected parent. No guest text or signature
+  bytes are rewritten. The 11 pure contract tests pass inside the isolated Linux
+  VM; this does not establish successful UpdateBrain launch or installation.
+  Use **gdb-multiarch**, not native x86 GDB, for this guest debugger interface.
+- One post-correction Continue attempt failed at 04:41:45 UTC. The lower-level
+  error changed to `xpcproxy: setup_role_account failed, error 0x4f` (EFTYPE 79),
+  before the service executable starts. No new launch-constraint crash report was
+  generated. Source signature verification passes. The bridge was cleanly detached with 134 existing
+  metadata repairs and **zero new-create repairs**; new-file inheritance remains
+  unvalidated.
+- A read-only instrumented attempt at 05:00 UTC localized the failure: the new
+  staging copy returns zero (later shown not to prove success), but the static-code object is null before
+  the role-account signature requirement is evaluated. Error reply is 79; the
+  signature-requirement and signing-information calls are not reached. Reference
+  daemon SHA-256 is `b25d5bd50c97efb7cf43643b91802fae701846bcd8e53eeae63666633eb87155`.
+  Its live UUID and exact probe instructions were verified. Log:
+  `roleaccount-stage-trace-v2.log`. A prior v1 observer detached with zero
+  observations because of signed-address conversion; no VM restart occurred.
+  Next bounded evidence: the precise CFURL/static-code path and original
+  `SecStaticCodeCreateWithPath` status, before changing any behavior.
+- Follow-up v5 evidence at 05:18 UTC disproves success of the staged copy:
+  `COPYFILE_ERR` callbacks start at the temporary root directory and continue
+  through its contents. The callback ignores these errors and recursive copy
+  returns 0. The non-null CFURL then yields **-67068 / static code not found**.
+  This is a missing staging destination, not a rejected Apple signature. The
+  first directory-create errno remains to be collected. No policy/signature
+  bypass is applied, and the next experiment is at the filesystem level rather
+  than another full installer retry. The v5 observer detached at errno 79.
+- Read-only storage-class evidence at 05:34 UTC establishes a second tmpfs
+  metadata omission: Sandbox asks the protected parent for `va_flags` and
+  `va_extflags` (mask 0x200000000400), but tmpfs reports supported mask 0x1600450,
+  missing bit 45. It therefore returns default `system` class 03 instead of
+  following the parent's RoleAccountStaging xattr. The original daemon is
+  entitled for RoleAccountStaging, not arbitrary system-protected storage.
+  Source: matching Sandbox `_rootless_get_storage_class`, tmpfs getattr, and
+  XNU `vnode_getattr`; log `tmpfs-storage-class-trace-v1.log`. This explains why
+  restricted flags alone are insufficient. Both guest observers are detached.
+- A native APFS differential uses a NEW 1 GiB scratch image inside the approved
+  data filesystem, not the installation target. QEMU's automatic USB hub was
+  not enumerated by this guest; `hw/usb/bus.c:usb_claim_port` explains the automatic
+  hub when one root port remains. Only the newly added empty hub was removed,
+  and the same scratch disk was attached explicitly to free root port 4.
+  Verified blank guest disk8, serial MACVMMETA20260903, size 1073741824 bytes,
+  was formatted once as APFS macvm-staging, disk9s1 on disk8s1, volume UUID
+  2DEFBA24-3C0E-4BC2-BA2D-A66AF5879A3A. Formatting and ownership enable succeeded.
+  No production resource or original guest device was replaced. Native metadata
+  inheritance and signed-copy validation are next; this is not an installed OS.
+- APFS copy evidence at 05:45–05:50: signed contents verify, but `ditto` does not
+  establish the restricted flag on either the existing volume root or a new
+  directory. The latter does preserve the storage-class xattr and mode. The
+  earlier helper PASS marker was false and is retired; explicit metadata guards
+  now fail closed. Next: the original vendor `rootless-init -b` startup repair,
+  with unchanged rootless.conf, on a fresh APFS staging volume (disk9s2, UUID
+  489C9422-DAD7-4130-8DBC-9C934B031438). Old tmpfs staging is to be preserved below
+  an ordinary mount; no signature/policy edit or VM restart is required.
+- The ordinary APFS mount was denied with EPERM and safely returned to its
+  `/Volumes` mount; no rootless-init repair was executed. The next source-driven
+  tmpfs bridge fixes the uncached-new-vnode path predicate and reports the absent
+  requested `va_extflags=0` only beneath the verified protected anchor. All 16
+  contract tests pass in isolated Linux. In the single subsequent preflight,
+  the actual role daemon resolves **RoleAccountStaging / class 0f**, errno 0,
+  instead of default system/class03; new staging objects really are created with
+  inherited restricted flags. This is not yet proof of UpdateBrain execution or
+  completed installation. This was the initial live checkpoint in
+  `tmpfs-metadata-compat-v4-role.log`; the final result follows.
+- Verified at guest 06:20:03–06:20:18 UTC: the new staging cache
+  `exec/872415233.7287.xpc` launches UpdateBrainService PID 10501, wakeup reaches
+  100%, and the installer identifies **Tahoe 26.6.2 / 25G83**, **Device is supported**.
+  The genuine license page and agreement-confirmation sheet are displayed.
+  No new launch-constraint crash is recorded. The bridge then detached normally
+  at its observation budget: 132 newly created objects inherited restricted
+  flags, 0 existing-object repairs, 8974 missing extended-attribute responses.
+  The VM and UpdateBrain remain running. This crosses preflight only: installation,
+  account creation and installed-system boot are not yet complete. The temporary
+  getter bridge is not a persistent filesystem implementation.
+- Initial target inventory also lacked a full-system disk. With explicit user
+  approval, a new 200 GiB host-side test data image was created. Both live VMs'
+  PCI disks report `hotpluggable=false`; the approved new disk therefore uses the
+  **outer test QEMU only** as a loopback NBD exporter. It was formatted with ext4
+  and mounted **inside the isolated Linux VM**. No existing disk was resized.
+- A new 128 GiB raw target inside that filesystem was attached successfully to
+  Boot119's existing hotpluggable virtual USB bus. macOS `diskutil list` identifies
+  it as **disk6**, external physical, **137.4 GB**, without a partition table.
+  Exact byte size, serial and empty whole-device identity were rechecked, then
+  only the blank new disk was successfully prepared as GPT/APFS `macos26`.
+  `disk7s1` is the new APFS volume, with physical store `disk6s2`; do not erase
+  again on resume.
+- After dismissing the failed installer, a QMP screendump request timed out while
+  waiting for a console update. QMP still reports running and all disk I/O states
+  are `ok`. A separate VNC capture succeeded and showed Recovery Springboard;
+  this is not evidence of a VM crash. VNC is now being used to inspect the UI.
+- Neither VM was restarted. The approved new storage is not yet automatically
+  reconnected after an outer VM restart. Exact resource identities, mount UUID,
+  evidence and resume constraints are in
+  [the installation progress record](docs/boot119-install-progress.md).
+
+### B011 — Target volume preflight: MSU_ERR_MISSING_TARGET (42)
+
+- After successful B010 wakeup, the original installer validates available
+  volumes. Guest system.log at 06:21:57 reports MobileSoftwareUpdateErrorDomain
+  code 42, `MSU_ERR_MISSING_TARGET`: "Unable to set target system volume for
+  preflight". The same error is then reported for the two diagnostic volumes
+  during enumeration; these are not manual installation retries.
+- License acceptance reaches the genuine disk-selection UI. Selecting the new
+  `macos26` shows that exact tooltip and a disabled Continue button. Evidence:
+  `artifacts/boot119/install-20260903032545/68-target-check.png`.
+- The exact target UUID remains 31209BA2-BC1F-4D51-99C1-4AFF986CB8AA, APFS
+  disk7s1 on disk6s2, read-write, owners enabled, ~137.1 GB free, 24 KiB used;
+  `diskutil info` reports OS Can Be Installed: Yes. This rules out an absent
+  physical disk or exhausted target capacity, not all installer requirements.
+- Matching OSInstallerSetupInternal code shows
+  `OSISCustomizationController validateTarget:withSystemTarget:error:` obtains
+  `liveFilesystemForTarget:`, passes its `diskUUID` to `setTargetVolumeUUID:`,
+  then requests `prerequisiteCheckForDescriptor:overrides:progressBlock:completion:`.
+  The lower-level MSU target resolution failure was subsequently localized below.
+  No disk role/partition/security-policy change is justified by the generic tooltip alone.
+- **Root cause:** the actual UpdateBrain log at
+  `/System/Volumes/Data/MobileSoftwareUpdate/restore.log` receives the correct
+  target UUID and reports `Failed to locate update container for target`.
+  Matching ARM64e UpdateBrainLibrary 2422.160.6, UUID
+  8BB113CF-7583-3554-82B4-B4C009A16A16, implements the selection in
+  `-[MSUTargetController setSystemTargetUUID:timeout:]` at file address 0xe7e4.
+  An external target with an embedded root device requires a normal internal
+  APFS physical store (role 0). The missing-container branch is 0xed98, before
+  Update-volume creation. At 06:55:56 UTC, guest IOKit/diskutil confirm both
+  internal Apple virtio disks have EmbeddedDeviceTypeRoot=Yes, but contain only
+  Recovery and iSC partitions. The normal APFS installation store is on external
+  USB disk6. This exactly matches the failed selection branch.
+- **Next bounded correction:** preserve the existing target image and attach it
+  as an internal Apple virtio root device on a planned inner-VM restart. Keep the
+  current AUX/iSC and Recovery disk state in a consistent offline backup and a
+  new run directory. Do not reformat, add guessed volume roles, or change installer
+  checks. The user approved one planned inner shutdown/restart. Boot119 then
+  shut down normally; its offline images, configuration and restore inputs were
+  backed up and verified. Boot120 is now running with the same target attached
+  internally and has reached Recovery's volume examination screen. No outer VM
+  restart or production-resource change occurred. Disk backup is not a RAM
+  snapshot; the temporary tmpfs bridge must be revalidated in Boot120.
+- B011 is not yet closed: Boot120's guest-visible topology and target preflight
+  still require verification. No completed OS installation or account creation.
+  Live checkpoint: `docs/boot120-install-progress.md`.
 
 ### Graphics storage follow-up
 
