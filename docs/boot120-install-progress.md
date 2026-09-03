@@ -773,3 +773,12 @@ at observed=100001 with create=132, existing=0, extflags=8730; the B012/B013
 NULL guard stays armed. The live terminal reader continues; no more screenshots
 are needed during this noninteractive phase. Guest and Linux clocks are not
 identical: retain both timestamps rather than infer timing from filenames.
+
+`guest-boot120-b015-progress.sh` provides a manual, one-shot read-only snapshot
+of this exact attempt, target UUID and ARM Recovery build. It includes the
+current install/console/restore logs and the established helper's open archive
+offsets only after rechecking its process identity. Offsets are not overall
+installation percentages. It never launches another installer, changes guest
+preferences, kills a process, or schedules a poll. Three new static safety
+contracts pass with the six existing log-first-launch contracts in isolated
+Linux; `bash -n` passes there as well.

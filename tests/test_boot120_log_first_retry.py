@@ -56,5 +56,34 @@ class LogFirstRetryTests(unittest.TestCase):
             self.assertNotIn(forbidden, source)
 
 
+class B015ProgressSnapshotTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.source = (Path(__file__).resolve().parents[1] / 'tools' /
+                      'guest-boot120-b015-progress.sh').read_text()
+
+    def test_guest_target_and_attempt_verified_before_output(self):
+        guard = self.source[:self.source.index('exec >/dev/console')]
+        for token in ('Darwin', 'arm64', 'VirtualMac2,1', '25G72', 'id -u',
+                      '31209BA2-BC1F-4D51-99C1-4AFF986CB8AA',
+                      'LOCAL_RETRY_B015_REQUESTED', 'LOCAL_ARCHIVE_READY'):
+            self.assertIn(token, guard)
+
+    def test_one_shot_readonly_not_installer_or_timer(self):
+        for token in ('defaults write', 'kill ', 'killall', 'pkill', 'curl ',
+                      'while ', 'sleep ', 'launchctl ', 'crontab ', 'tail -F',
+                      'tail -f', 'screendump', 'reboot', 'rm ', 'touch '):
+            self.assertNotIn(token, self.source)
+        self.assertIn('MACVM_B015_ACTUAL_PROGRESS_END', self.source)
+
+    def test_exact_helper_and_no_false_percent(self):
+        self.assertIn('ps -p 10793 -o comm=', self.source)
+        self.assertIn('*/osinstallersetupd)', self.source)
+        self.assertIn('lsof -nP -o -p 10793', self.source)
+        self.assertIn('NO_LSOF', self.source)
+        self.assertIn('OFFSETS_NOT_OVERALL_PERCENT', self.source)
+        self.assertIn('b015-local-archive-installer-console.log', self.source)
+
+
 if __name__ == '__main__':
     unittest.main()
