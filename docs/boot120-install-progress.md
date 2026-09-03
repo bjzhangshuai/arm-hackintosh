@@ -782,3 +782,18 @@ installation percentages. It never launches another installer, changes guest
 preferences, kills a process, or schedules a poll. Three new static safety
 contracts pass with the six existing log-first-launch contracts in isolated
 Linux; `bash -n` passes there as well.
+
+The first actual snapshot completed at guest 14:35 UTC: helper 10793 remained
+alive and had `payload.042` open for writing at offset 53,216,808. The input ZIP
+descriptor already pointed to its end while extraction continued, directly
+demonstrating why that cursor must not be called 100% complete. QMP at Linux
+14:40:04 remained running with target I/O ok, zero failed reads/writes and no
+native crash; cumulative target writes continued increasing. The current phase
+is still local unarchive, not native verification or preparation success.
+
+An ordinary hide shortcut was attempted only after progress began, but the
+window was not confirmed hidden. No GUI process was closed or suspended;
+log-first observation is active, not a claim of a pure headless installer.
+Do not repeat screenshots just to measure progress. The existing bounded GDB
+session still owns the one-shot NULL guard; never attach a second debugger or
+signal the main QEMU runner while waiting for later preparation.
