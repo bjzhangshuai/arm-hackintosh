@@ -5,8 +5,8 @@
 
 ## 当前真实进度（2026-09-03）
 
-- **当前运行的是 Boot120：内部安装盘预检成功，已进入磁盘安装进度页，正在下载 26.6.2／25G83 安装包。** 尚未完成安装、创建用户或验证安装后启动。[当前记录](docs/boot120-install-progress.md) / [重启衔接计划](docs/boot120-installed-handoff-plan.md)。
-- 先前 26.6／25G72 IPSW（19.77 GB）已复用于恢复启动，但**完整离线安装流程尚未打通**；当前 Recovery 安装器另取 26.6.2 的 InstallAssistant.pkg（18.38 GB）。不能把“IPSW 已下载”写成“后续安装不再下载”。
+- **当前 Boot120 / B015 正在使用本地 26.6.2／25G83 安装包解包安装，不是重新在线下载。** 同一安装进程已通过服务启动、许可确认和内部目标盘选择，进度以实际日志为准。尚未完成安装、创建用户或验证安装后启动。[当前记录](docs/boot120-install-progress.md) / [重启衔接计划](docs/boot120-installed-handoff-plan.md)。
+- 26.6／25G72 IPSW 已复用于恢复启动；后续取得的 25G83 系统负载已本地保留、打包校验并备份，当前重试复用该本地归档。**完整离线安装流程尚未验收**，不能把本地负载复用等同于安装完成或全部鉴权步骤不联网。
 - **Boot119 已进入 ARM64 macOS Tahoe 26.6 / 25G72 的真实安装欢迎界面。** 2026-09-03 03:09:33（北京时间）的 QMP 截图包含完整 Tahoe 图案、标题、说明和 Continue 按钮；旧窗口内容残留已不再出现。
 - ARM64 XNU、RecoveryOS、WindowServer、语言选择、恢复工具、真实激活与 KeyRecoveryAssistant 均已运行；安装器为 Mach-O arm64，`InstallAssistant` PID 312、`osinstallersetupd` PID 318。版本、哈希、截图和验收边界见 [Boot119 验收记录](docs/boot119-installer-acceptance.md)。**仅通过“进入安装界面”验收，尚未完成磁盘安装或验证安装后启动。**
 - 图形路径修复包含无用描述符加载、可写纹理被当成采样纹理、访问分析误认字面量和能力编号错误，并通过独立回归及真实 UI 验证。Boot119 已按用户批准正常关机并完成备份；Boot120 沿用同一 QEMU 构建，将现有安装盘改接内部 Apple virtio，未重新格式化。
