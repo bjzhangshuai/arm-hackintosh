@@ -2,14 +2,14 @@
 
 ## Current validation status — 2026-09-03, Boot120 local prepare repair
 
-**Latest (14:04 UTC):** The B013 local retry launched InstallAssistant PID
-10515 with a live install.log/console follower, but its UpdateBrain startup
-failed at role-account setup (EFTYPE 79, then SUMacController 7721 / MSU 27).
-It has not entered another installation-progress phase. No further installer
-retry or VM restart followed. The metadata bridge recorded zero scoped changes
-before normal global-budget retirement; its coverage must be re-established
-from live staging identity and callback evidence before another launch.
-The separate B012 NULL guard remains armed and unhit. See B014 below.
+**Latest (14:25 UTC):** Following the source-led B014 diagnosis and a verified
+pre-launch coverage check, B015 launched InstallAssistant 10787 / helper 10793.
+UpdateBrain 10796 actually reached running state at guest 14:24:24, and wakeup
+succeeded at 14:24:31. The installer selected the same local UpdateBundle.zip
+(26.6.2 / 25G83) and reports Device is supported. The earlier role-account
+startup failure is crossed in this attempt. The B012 NULL guard remains armed
+and unhit; a new installation-progress phase and installation completion are
+not yet established. No VM restart occurred. See B014 below.
 
 Boot120's internal target passes the actual prerequisite check and reaches the
 installation progress UI. At 10:23 UTC the installer shows a software-update
@@ -31,7 +31,8 @@ See `docs/boot120-install-progress.md` for current evidence; Boot119 below is hi
 
 ### B014 — Log-first retry exposes missing staging compatibility coverage
 
-- **State:** Actual service startup failed; no second retry has been launched.
+- **State:** The original log-first launch failed; subsequent coverage-gated
+  B015 launch passes actual service startup. Installation follow-through remains.
 - **Evidence:** Guest install.log at 14:03:07 reports xpcproxy PID 10529
   `setup_role_account failed, error 0x4f`; at 14:03:08 helper 10521 reports
   SUMacController 7721 / MSU_ERR_FAILED_BRAIN_LOAD(27). This is earlier than
@@ -51,6 +52,18 @@ See `docs/boot120-install-progress.md` for current evidence; Boot119 below is hi
   Distinguish stale identity, unsupported-query filtering and budget timing
   before changing code. Do not widen security scope, relabel unknown bundles,
   reset the global budget blindly or restart the installer in a loop.
+- **Completed diagnosis/gate:** A 2048-byte read-only QMP inspection confirms
+  the original anchor is unchanged and protected. A separate read-only query
+  observer captures the same missing bit-45 requests for anchor/exec/tmp and
+  detaches after 976 observations / 38 scoped calls. Before B015 launch, a
+  non-launching preflight verifies nine actual scoped compatibility responses.
+  The combined bridge now refuses continuation after zero-coverage budget
+  exhaustion. No path/security scope or budget is enlarged. 112 focused tests
+  pass in isolated Linux, including the real callback and lifetime regression.
+- **Live acceptance:** The unchanged role daemon resolves RoleAccountStaging,
+  class 0f, errno 0, and creates the protected new staging cache. UpdateBrain
+  10796 starts successfully; the installer selects local 25G83 at 14:24:31.
+  The signature/NULL-cleanup/installed-system gates remain independent.
 - **Log-first feature:** Live `/var/log/install.log` and installer stdout now
   reach serial/terminal without periodic screenshots. The outer text filter
   uses `grep -a` because serial output can contain NUL bytes; raw evidence is

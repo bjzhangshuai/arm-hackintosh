@@ -727,3 +727,13 @@ settings. The active bridge actually emitted nine scoped extflags responses
 for anchor/exec/tmp. Only after inspecting this evidence was the B015 launch
 command delivered. This is proof of pre-launch bridge coverage, not yet of
 UpdateBrain startup, NULL cleanup repair or installation completion.
+
+The gated B015 launch subsequently started assistant 10787, helper 10793 and
+UpdateBrain 10796. The actual role daemon resolves the expected storage class
+0f with errno 0, and the new cache is `exec/872415233.6705.xpc`. Launchd records
+the brain running at 14:24:24, wakeup success reaches the installer at 14:24:31,
+and it explicitly selects the local SharedSupport UpdateBundle.zip / 26.6.2 /
+25G83. At 14:24:58 it reports Device is supported and loads the bundled license.
+One observed welcome Continue click was issued; do not repeat it while the
+license view is still rendering. The later preparation/NULL-repair gate remains
+open, and these startup facts are not installation completion.
